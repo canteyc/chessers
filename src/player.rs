@@ -12,7 +12,9 @@ pub struct RandomPlayer {
 impl Player for RandomPlayer {
     fn make_move(&self, board: &Board) -> ChessMove {
         let moves = MoveGen::new_legal(board);
-        moves.choose(&mut rand::thread_rng()).expect("There should be a legal move")
+        let random_move = moves.choose(&mut rand::thread_rng()).expect("There should be a legal move");
+        println!("{}", random_move);
+        random_move
     }
 }
 
@@ -20,29 +22,36 @@ pub struct HumanPlayer {
 
 }
 
-impl Player for HumanPlayer {
-    fn make_move(&self, board: &Board) -> ChessMove {
+impl HumanPlayer {
+    fn get_input(&self, board: &Board) -> Option<ChessMove> {
         let mut user_input = String::new();
         std::io::stdin()
             .read_line(&mut user_input)
             .expect("Failed to read move");
-        let mut user_move = ChessMove::from_san(board, &*user_input);
-        while user_move.is_err() {
-            println!("Invalid move");
-            user_input = String::new();
-            std::io::stdin()
-                .read_line(&mut user_input)
-                .expect("Failed to read move");
-            if user_input.contains("list") {
-                println!("Here are all the moves you can do:");
-                for legal_move in MoveGen::new_legal(board) {
-                    println!("{}", legal_move);
-                };
+        if user_input.contains("list") {
+            println!("Here are all the moves you can do:");
+            for legal_move in MoveGen::new_legal(board) {
+                println!("{}", legal_move);
+            };
+            None
+        }
+        else {
+            match ChessMove::from_san(board, &*user_input) {
+                Ok(user_move) => Some(user_move),
+                _ => {
+                    println!("Invalid move");
+                    None
+                }
             }
-            else {
-                println!("{}", user_input);
-                user_move = ChessMove::from_san(board, &*user_input);
-            }
+        }
+    }
+}
+
+impl Player for HumanPlayer {
+    fn make_move(&self, board: &Board) -> ChessMove {
+        let mut user_move = self.get_input(board);
+        while user_move.is_none() {
+            user_move = self.get_input(board);
         }
         user_move.expect("How did we get out of the while loop?")
     }

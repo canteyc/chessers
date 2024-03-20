@@ -6,6 +6,7 @@ use crate::ui::{ConsoleUI, UI};
 mod playground;
 mod player;
 mod ui;
+mod nn;
 
 fn main() {
     let mut game = Game::new();
@@ -17,25 +18,26 @@ fn main() {
     for i in 1..1000 {
         let p1_move = p1.make_move(&game.current_position());
         game.make_move(p1_move);
+        if check_game(&mut game, i) { break; };
         let p2_move = p2.make_move(&game.current_position());
         game.make_move(p2_move);
+        if check_game(&mut game, i) { break; };
         gui.update(&game.current_position());
-        if !check_game(&mut game) {
-            println!("finished after {}", i);
-            if game.result().is_some() {
-                println!("{:?}", game.result().expect(""))
-            }
-            break
-        }
     }
 }
 
-fn check_game(game: &mut Game) -> bool {
+fn check_game(game: &mut Game, i: i32) -> bool{
     if game.can_declare_draw() {
         game.declare_draw();
     }
     match game.result() {
-        Some(_) => false,
-        None => true,
+        Some(_) => {
+            println!("finished after {}", i);
+            if game.result().is_some() {
+                println!("{:?}", game.result().expect(""))
+            }
+            true
+        },
+        None => false,
     }
 }

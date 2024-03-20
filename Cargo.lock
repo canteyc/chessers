@@ -146,6 +146,7 @@ dependencies = [
 name = "chessers"
 version = "0.1.0"
 dependencies = [
+ "candle-core",
  "candle-nn",
  "chess",
  "rand 0.8.5",
