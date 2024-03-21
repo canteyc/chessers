@@ -3,13 +3,13 @@ use candle_core::{Device, Tensor};
 use candle_nn::{Conv2d, ConvTranspose2d, Module, VarBuilder};
 use crate::player::Player;
 
-struct ChessNet {
+pub struct ChessNet {
     c1: Conv2d,
     t1: ConvTranspose2d,
 }
 
 impl ChessNet {
-    fn new(vs: VarBuilder) -> ChessNet {
+    pub fn new(vs: VarBuilder) -> ChessNet {
         ChessNet {
             c1: candle_nn::conv2d(6, 2, 3, Default::default(), vs.pp("c1")).expect(""),
             t1: candle_nn::conv_transpose2d(2, 2, 3, Default::default(), vs.pp("t1")).expect(""),
@@ -72,19 +72,28 @@ impl ChessNet {
     fn move_to_score(chess_move: &ChessMove, scores: &Tensor) -> f64 {
         let source = chess_move.get_source();
         let dest = chess_move.get_dest();
-        // let source_score = scores[source.get_file().to_index()][source.get_rank().to_index()];
-        0.
+        let source_score: f64 = scores
+            .get(0).unwrap()
+            .get(source.get_file().to_index()).unwrap()
+            .get(source.get_rank().to_index()).unwrap()
+            .to_scalar().unwrap();
+        let dest_score: f64 = scores
+            .get(1).unwrap()
+            .get(dest.get_file().to_index()).unwrap()
+            .get(dest.get_rank().to_index()).unwrap()
+            .to_scalar().unwrap();
+        source_score + dest_score
     }
 }
 
 impl Player for ChessNet {
     fn make_move(&self, board: &Board) -> ChessMove {
         let x = match ChessNet::board_to_tensor(board) {
-            Ok(ok) => ok,
+            Ok(ok) => ok.unsqueeze(0).unwrap(),
             Err(e) => panic!("{:?}", e)
         };
         let scores = match self.forward(&x) {
-            Ok(s) => s,
+            Ok(s) => s.get(0).unwrap(),
             Err(e) => panic!("{:?}", e)
         };
         let moves = MoveGen::new_legal(board);
@@ -95,6 +104,7 @@ impl Player for ChessNet {
             Some(m) => m,
             None => panic!("Didn't find a best move")
         };
+        println!("{}", best_move);
         best_move
     }
 }
@@ -110,7 +120,7 @@ mod test {
     #[test]
     fn dims() {
         let varmap = VarMap::new();
-        let vs = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        let vs = VarBuilder::from_varmap(&varmap, DType::F64, &Device::Cpu);
         let model = ChessNet::new(vs);
         let input = match Tensor::randn(0f32, 1.0, (1, 6, 8, 8), &Device::Cpu) {
             Ok(input) => input,
