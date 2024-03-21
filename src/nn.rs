@@ -1,4 +1,4 @@
-use chess::{BitBoard, Board, ChessMove, Color, Piece};
+use chess::{BitBoard, Board, ChessMove, Color, MoveGen, Piece};
 use candle_core::{Device, Tensor};
 use candle_nn::{Conv2d, ConvTranspose2d, Module, VarBuilder};
 use crate::player::Player;
@@ -49,6 +49,7 @@ impl ChessNet {
         };
         array
     }
+
     fn board_to_tensor(board: &Board) -> candle_core::Result<Tensor> {
         let pawns = board.pieces(Piece::Pawn);
         let rooks = board.pieces(Piece::Rook);
@@ -67,13 +68,36 @@ impl ChessNet {
         ];
         Tensor::new(&input_array, &Device::Cpu)
     }
+
+    fn move_to_score(chess_move: &ChessMove, scores: &Tensor) -> f64 {
+        let source = chess_move.get_source();
+        let dest = chess_move.get_dest();
+        // let source_score = scores[source.get_file().to_index()][source.get_rank().to_index()];
+        0.
+    }
 }
 
-// impl Player for ChessNet {
-//     fn make_move(&self, board: &Board) -> ChessMove {
-//
-//     }
-// }
+impl Player for ChessNet {
+    fn make_move(&self, board: &Board) -> ChessMove {
+        let x = match ChessNet::board_to_tensor(board) {
+            Ok(ok) => ok,
+            Err(e) => panic!("{:?}", e)
+        };
+        let scores = match self.forward(&x) {
+            Ok(s) => s,
+            Err(e) => panic!("{:?}", e)
+        };
+        let moves = MoveGen::new_legal(board);
+        let best_move = match moves.max_by(|m, n| {
+            ChessNet::move_to_score(m, &scores)
+                .partial_cmp(&ChessNet::move_to_score(n, &scores)).unwrap()
+        }) {
+            Some(m) => m,
+            None => panic!("Didn't find a best move")
+        };
+        best_move
+    }
+}
 
 
 #[cfg(test)]
