@@ -1,23 +1,38 @@
 use chess::{BitBoard, Board, ChessMove, Color, MoveGen, Piece};
-use candle_core::{Device, Tensor};
-use candle_nn::{Conv2d, ConvTranspose2d, Module, VarBuilder};
+use candle_core::{Device, DType, Tensor};
+use candle_nn::{Conv2d, ConvTranspose2d, Module, VarBuilder, VarMap};
 use crate::player::Player;
 
 pub struct ChessNet {
+    varmap: VarMap,
     c1: Conv2d,
     t1: ConvTranspose2d,
 }
 
-impl ChessNet {
-    pub fn new(vs: VarBuilder) -> ChessNet {
+impl  ChessNet {
+    pub fn new(varmap: VarMap) -> ChessNet {
+        let vs = VarBuilder::from_varmap(&varmap, DType::F64, &Device::Cpu);
         ChessNet {
+            varmap,
             c1: candle_nn::conv2d(6, 2, 3, Default::default(), vs.pp("c1")).expect(""),
             t1: candle_nn::conv_transpose2d(2, 2, 3, Default::default(), vs.pp("t1")).expect(""),
         }
     }
+
+    pub fn get_weights_and_biases(&self, name: &str) -> (&Tensor, &Tensor) {
+        match name {
+            "c1" => (self.c1.weight(), self.c1.bias().unwrap()),
+            "t1" => (self.t1.weight(), self.t1.bias().unwrap()),
+            _ => panic!("Invalid layer name: {}", name)
+        }
+    }
+
+    pub fn save(&self, file: String) {
+        self.varmap.save(file).expect("TODO: panic message");
+    }
 }
 
-impl Module for ChessNet {
+impl  Module for ChessNet {
     fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
         xs.apply(&self.c1).expect("c1")
             .relu().expect("relu1")
@@ -26,7 +41,7 @@ impl Module for ChessNet {
     }
 }
 
-impl ChessNet {
+impl  ChessNet {
     fn bitboard_to_array(bitboard: &BitBoard, white: &BitBoard) -> [[f64; 8]; 8] {
         let mut array = [
             [0., 0., 0., 0., 0., 0., 0., 0.],
@@ -86,7 +101,7 @@ impl ChessNet {
     }
 }
 
-impl Player for ChessNet {
+impl  Player for ChessNet {
     fn make_move(&self, board: &Board) -> ChessMove {
         let x = match ChessNet::board_to_tensor(board) {
             Ok(ok) => ok.unsqueeze(0).unwrap(),
@@ -104,7 +119,7 @@ impl Player for ChessNet {
             Some(m) => m,
             None => panic!("Didn't find a best move")
         };
-        println!("{}", best_move);
+        // println!("{}", best_move);
         best_move
     }
 }
@@ -112,17 +127,16 @@ impl Player for ChessNet {
 
 #[cfg(test)]
 mod test {
-    use candle_core::{Device, DType, Module, Tensor};
-    use candle_nn::{Conv2d, Conv2dConfig, Linear, seq, VarBuilder, VarMap};
+    use candle_core::{Device, Module, Tensor};
+    use candle_nn::{VarMap};
     use chess::{Board, Color, Piece};
     use crate::nn::ChessNet;
 
     #[test]
     fn dims() {
         let varmap = VarMap::new();
-        let vs = VarBuilder::from_varmap(&varmap, DType::F64, &Device::Cpu);
-        let model = ChessNet::new(vs);
-        let input = match Tensor::randn(0f32, 1.0, (1, 6, 8, 8), &Device::Cpu) {
+        let model = ChessNet::new(varmap);
+        let input = match Tensor::randn(0f64, 1.0, (1, 6, 8, 8), &Device::Cpu) {
             Ok(input) => input,
             Err(e) => {
                 panic!("Failed to create input tensor: \n{:?}\n", e);
@@ -135,6 +149,7 @@ mod test {
             }
         };
         println!("{:?}", output.shape());
+        println!("{:?}", model.get_weights_and_biases("c1").1.shape())
     }
 
     #[test]

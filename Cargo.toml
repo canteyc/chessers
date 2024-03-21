@@ -6,7 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-chess = "3.2.0"
 candle-core = "0.4.1"
 candle-nn = "0.4.1"
+chess = "3.2.0"
+chrono = "0.4.35"
 rand = "0.8.5"

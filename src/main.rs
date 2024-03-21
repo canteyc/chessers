@@ -1,9 +1,7 @@
-use candle_core::{Device, DType};
-use candle_nn::{VarBuilder, VarMap};
+use candle_nn::{VarMap};
 use chess::Game;
-use crate::player::{HumanPlayer, Player};
-use player::RandomPlayer;
-use crate::arena::check_game;
+use crate::player::{Player};
+use crate::arena::{Arena, check_game};
 use crate::nn::ChessNet;
 use crate::ui::{ConsoleUI, UI};
 
@@ -14,25 +12,30 @@ mod nn;
 mod arena;
 
 fn main() {
+    // play();
+    let start = chrono::Utc::now();
+    let mut arena = Arena::new();
+    arena.train();
+    println!("Spent: {}s", (chrono::Utc::now() - start).num_seconds());
+}
+
+fn play() {
     let mut game = Game::new();
-    let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F64, &Device::Cpu);
-    let p1 = ChessNet::new(vs);
-    let vs = VarBuilder::from_varmap(&varmap, DType::F64, &Device::Cpu);
-    let p2 = ChessNet::new(vs);
+    let p1 = ChessNet::new(VarMap::new());
+    let p2 = ChessNet::new(VarMap::new());
     let gui = ConsoleUI {};
     gui.update(&game.current_position());
 
-    for i in 1..1000 {
+    for _ in 1..1000 {
         let p1_move = p1.make_move(&game.current_position());
         game.make_move(p1_move);
-        if check_game(&mut game, i) {
+        if check_game(&mut game) {
             gui.update(&game.current_position());
             break;
         };
         let p2_move = p2.make_move(&game.current_position());
         game.make_move(p2_move);
-        if check_game(&mut game, i) {
+        if check_game(&mut game) {
             gui.update(&game.current_position());
             break;
         };
