@@ -70,6 +70,7 @@ impl  ChessNet {
 
 pub struct Arena {
     members: Vec<ChessNet>,
+    log_dir: String,
 }
 
 impl Arena {
@@ -82,8 +83,15 @@ impl Arena {
             let varmap = VarMap::new();
             members.push(ChessNet::new(varmap));
         }
+
+        let date = chrono::Utc::now();
+        let log_dir = format!("/home/cory/repos/chessers/resources/logs/{}_{:02}_{:02}",
+                              date.year(), date.month(), date.day());
+        create_dir_all(&log_dir).expect("Error creating log directory");
+
         Arena {
-            members
+            members,
+            log_dir
         }
     }
 
@@ -99,10 +107,6 @@ impl Arena {
     }
 
     pub(crate) fn train(&mut self) {
-        let date = chrono::Utc::now();
-        let log_folder = format!("/home/cory/repos/chessers/resources/logs/{}_{:02}_{:02}", date.year(), date.month(), date.day());
-        create_dir_all(&log_folder).expect("Error creating log directory");
-
         for epoch in 0..Arena::NUM_EPOCHS {
             let mut scores = vec![vec![1u64; Arena::NUM_MEMBERS]; Arena::NUM_MEMBERS];
             for (i, member_white) in (&self.members).iter().enumerate() {
@@ -117,7 +121,7 @@ impl Arena {
                 }
             }
             let totals = scores.iter().map(|row| row.iter().sum::<u64>());
-            let dist: WeightedIndex<u64> = WeightedIndex::new(totals).unwrap();
+            let dist: WeightedIndex<u64> = WeightedIndex::new(totals.clone()).unwrap();
             let mut new_members: Vec<ChessNet> = vec!();
             for (i, member) in (&self.members).iter().enumerate() {
                 let j = dist.sample(&mut thread_rng());
@@ -129,9 +133,16 @@ impl Arena {
             println!("Scores: {:?}", scores);
             println!("Wins: {:?}", scores.iter().flatten().filter(|&&v| v == 2).count());
             for (i, member) in self.members.iter().enumerate() {
-                member.save(format!("{}/{:04}_{:04}.safetensors", &log_folder, epoch, i));
+                member.save(format!("{}/{:04}_{:04}.safetensors", &self.log_dir, epoch, i));
             }
+            let champ = &self.members[totals.enumerate().max_by(|(_, value0), (_, value1)| value0.cmp(value1)).unwrap().0]
+            self.evaluate(champ);
+            // save differently
         }
+    }
+
+    fn evaluate(&self, champion: &ChessNet) {
+        // Compare champion to the best from all previous epochs
     }
 }
 
@@ -140,7 +151,8 @@ pub fn check_game(game: &mut Game) -> bool{
         game.declare_draw();
     }
     match game.result() {
-        Some(_) => {
+        Some(r) => {
+            println!("{:?}", r);
             true
         },
         None => false,

@@ -18,6 +18,12 @@ impl  ChessNet {
             t1: candle_nn::conv_transpose2d(2, 2, 3, Default::default(), vs.pp("t1")).expect(""),
         }
     }
+    
+    pub fn from_file(safe_tensors_file: &str) -> ChessNet {
+        let mut varmap = VarMap::new();
+        varmap.load(safe_tensors_file).expect("Coulnd't read safetensors file");
+        ChessNet::new(varmap)
+    }
 
     pub fn get_weights_and_biases(&self, name: &str) -> (&Tensor, &Tensor) {
         match name {
