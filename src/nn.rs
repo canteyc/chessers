@@ -113,11 +113,13 @@ impl  Player for ChessNet {
             Ok(ok) => ok.unsqueeze(0).unwrap(),
             Err(e) => panic!("{:?}", e)
         };
+        // find desirable board positions
         let scores = match self.forward(&x) {
             Ok(s) => s.get(0).unwrap(),
             Err(e) => panic!("{:?}", e)
         };
         let moves = MoveGen::new_legal(board);
+        // compare legal moves to desirable position to find which one gets closest
         let best_move = match moves.max_by(|m, n| {
             ChessNet::move_to_score(m, &scores)
                 .partial_cmp(&ChessNet::move_to_score(n, &scores)).unwrap()
