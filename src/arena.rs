@@ -1,4 +1,6 @@
-use std::fs::create_dir_all;
+use std::fs::{create_dir_all, File};
+use std::env;
+use std::fmt::format;
 use candle_core::{Device, DType, Tensor, NdArray};
 use candle_nn::{VarMap};
 use chess::{Game, GameResult};
@@ -85,13 +87,13 @@ impl Arena {
         }
 
         let date = chrono::Utc::now();
-        let log_dir = format!("/home/cory/repos/chessers/resources/logs/{}_{:02}_{:02}",
-                              date.year(), date.month(), date.day());
+        let log_dir = format!("{}/resources/logs/{}_{:02}_{:02}",
+                              env::var("OUT_DIR").unwrap(), date.year(), date.month(), date.day());
         create_dir_all(&log_dir).expect("Error creating log directory");
 
         Arena {
             members,
-            log_dir
+            log_dir,
         }
     }
 
@@ -107,6 +109,14 @@ impl Arena {
     }
 
     pub(crate) fn train(&mut self) {
+        // create champs.csv for logging champion index of each epoch
+        let champ_file = format!("{}/champs.csv", &self.log_dir);
+        let mut champ_writer = csv::Writer::from_path(&champ_file)
+            .expect(format!("Failed to open {} for writing", &champ_file).as_str());
+        champ_writer.write_record(&["Epoch", "Champ index", "Wins"])
+            .expect("TODO: panic message");
+        
+        
         for epoch in 0..Arena::NUM_EPOCHS {
             let mut scores = vec![vec![1u64; Arena::NUM_MEMBERS]; Arena::NUM_MEMBERS];
             for (i, member_white) in (&self.members).iter().enumerate() {
@@ -135,14 +145,46 @@ impl Arena {
             for (i, member) in self.members.iter().enumerate() {
                 member.save(format!("{}/{:04}_{:04}.safetensors", &self.log_dir, epoch, i));
             }
-            let champ = &self.members[totals.enumerate().max_by(|(_, value0), (_, value1)| value0.cmp(value1)).unwrap().0]
-            self.evaluate(champ);
-            // save differently
+            let champ_id = totals.enumerate().max_by(|(_, value0), (_, value1)| value0.cmp(value1)).unwrap().0;
+            let champ = &self.members[champ_id];
+            let wins = self.evaluate(champ, champ_file.as_str());
+            self.log_champ(&mut champ_writer, epoch, champ_id, wins);
         }
     }
 
-    fn evaluate(&self, champion: &ChessNet) {
+    fn evaluate(&self, champion: &ChessNet, champs_file: &str) -> i32 {
         // Compare champion to the best from all previous epochs
+        let mut reader = csv::Reader::from_path(champs_file).unwrap();
+        {
+            reader.headers().unwrap();
+        }
+        let mut wins = 0;
+        for result in reader.records() {
+            let row = result.unwrap();
+            let epoch = row.get(0).unwrap();
+            let index = row.get(1).unwrap();
+            let path = format!("{}/{:04}_{:04}.safetensors", &self.log_dir, epoch, index);
+            let opponent = ChessNet::from_file(path.as_str());
+            let result = Arena::play_game(&champion, &opponent);
+            match result {
+                GameResult::WhiteCheckmates => wins += 1,
+                GameResult::BlackCheckmates => (),
+                _ => (),
+            };;
+            let result = Arena::play_game(&opponent, &champion);
+            match result {
+                GameResult::WhiteCheckmates => (),
+                GameResult::BlackCheckmates => wins += 1,
+                _ => (),
+            };
+        }
+        wins
+    }
+    
+    fn log_champ(&self, writer: &mut csv::Writer<File>, epoch: i32, index: usize, wins: i32) {
+        writer.write_record(&[epoch.to_string(), index.to_string(), wins.to_string()])
+            .expect("TODO: panic message");
+        writer.flush().unwrap();
     }
 }
 
