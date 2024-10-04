@@ -1,6 +1,5 @@
 use std::fs::{create_dir_all, File};
 use std::env;
-use std::fmt::format;
 use candle_core::{Device, DType, Tensor, NdArray};
 use candle_nn::{VarMap};
 use chess::{Game, GameResult};
@@ -76,8 +75,8 @@ pub struct Arena {
 }
 
 impl Arena {
-    const NUM_MEMBERS: usize = 64;
-    const NUM_EPOCHS: i32 = 100;
+    const NUM_MEMBERS: usize = 8;
+    const NUM_EPOCHS: i32 = 10;
 
     pub fn new() -> Arena {
         let mut members: Vec<ChessNet> = vec!();
@@ -87,8 +86,9 @@ impl Arena {
         }
 
         let date = chrono::Utc::now();
-        let log_dir = format!("{}/resources/logs/{}_{:02}_{:02}",
-                              env::var("OUT_DIR").unwrap(), date.year(), date.month(), date.day());
+        let resources = env::var("HOME").expect("No HOME dir?") + "/.chessers";
+        let log_dir = format!("{}/logs/{}_{:02}_{:02}",
+                              resources, date.year(), date.month(), date.day());
         create_dir_all(&log_dir).expect("Error creating log directory");
 
         Arena {
@@ -161,8 +161,8 @@ impl Arena {
         let mut wins = 0;
         for result in reader.records() {
             let row = result.unwrap();
-            let epoch = row.get(0).unwrap();
-            let index = row.get(1).unwrap();
+            let epoch: i32 = row.get(0).unwrap().parse().unwrap();
+            let index: i32 = row.get(1).unwrap().parse().unwrap();
             let path = format!("{}/{:04}_{:04}.safetensors", &self.log_dir, epoch, index);
             let opponent = ChessNet::from_file(path.as_str());
             let result = Arena::play_game(&champion, &opponent);
@@ -170,7 +170,7 @@ impl Arena {
                 GameResult::WhiteCheckmates => wins += 1,
                 GameResult::BlackCheckmates => (),
                 _ => (),
-            };;
+            };
             let result = Arena::play_game(&opponent, &champion);
             match result {
                 GameResult::WhiteCheckmates => (),

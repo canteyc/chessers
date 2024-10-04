@@ -1,6 +1,6 @@
-use candle_nn::{VarMap};
+// use candle_nn::{VarMap};
 use chess::Game;
-use crate::player::{HumanPlayer, Player, RandomPlayer};
+use crate::player::{Player};
 use crate::arena::{Arena, check_game};
 use crate::nn::ChessNet;
 use crate::ui::{ConsoleUI, UI};
@@ -12,11 +12,11 @@ mod nn;
 mod arena;
 
 fn main() {
-    play();
-    // let start = chrono::Utc::now();
-    // let mut arena = Arena::new();
-    // arena.train();
-    // println!("Spent: {}s", (chrono::Utc::now() - start).num_seconds());
+    // play();
+    let start = chrono::Utc::now();
+    let mut arena = Arena::new();
+    arena.train();
+    println!("Spent: {}s", (chrono::Utc::now() - start).num_seconds());
 }
 
 fn play() {
