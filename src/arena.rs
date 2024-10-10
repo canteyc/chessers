@@ -70,17 +70,16 @@ impl  ChessNet {
 }
 
 pub struct Arena {
+    num_members: usize,
+    num_epochs: i32,
     members: Vec<ChessNet>,
     log_dir: String,
 }
 
 impl Arena {
-    const NUM_MEMBERS: usize = 8;
-    const NUM_EPOCHS: i32 = 10;
-
-    pub fn new() -> Arena {
+    pub fn new(num_members: usize, num_epochs: i32) -> Arena {
         let mut members: Vec<ChessNet> = vec!();
-        for _ in 0..Arena::NUM_MEMBERS {
+        for _ in 0..num_members {
             let varmap = VarMap::new();
             members.push(ChessNet::new(varmap));
         }
@@ -92,6 +91,8 @@ impl Arena {
         create_dir_all(&log_dir).expect("Error creating log directory");
 
         Arena {
+            num_members,
+            num_epochs,
             members,
             log_dir,
         }
@@ -117,8 +118,8 @@ impl Arena {
             .expect("TODO: panic message");
         
         
-        for epoch in 0..Arena::NUM_EPOCHS {
-            let mut scores = vec![vec![1u64; Arena::NUM_MEMBERS]; Arena::NUM_MEMBERS];
+        for epoch in 0..self.num_epochs {
+            let mut scores = vec![vec![1u64; self.num_members]; self.num_members];
             for (i, member_white) in (&self.members).iter().enumerate() {
                 for (j, member_black) in (&self.members).iter().enumerate() {
                     let result = Arena::play_game(&member_white, &member_black);
@@ -212,7 +213,7 @@ mod test {
 
     #[test]
     fn run() {
-        let mut arena = Arena::new();
+        let mut arena = Arena::new(2, 2);
         arena.train();
     }
 
