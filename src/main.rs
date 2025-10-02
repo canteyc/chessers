@@ -54,7 +54,7 @@ impl ChessApp {
         Self {
             board: Board::default(),
             selected_square: None,
-            white_player: Player::Human, // Default to Human vs Bot
+            white_player: Player::Bot(BotModel::Random), // Default to Human vs Bot
             black_player: Player::Bot(BotModel::Mlp),
             mlp_model,
             model_status,

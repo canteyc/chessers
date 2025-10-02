@@ -10,11 +10,11 @@ pub struct Mlp {
 
 impl Mlp {
     pub fn new(vb: VarBuilder) -> Result<Self> {
-        // Input: 13x8x8 = 832
+        // Input: 13x8x8 = 832 (12 piece types plus white/black mask)
         // Hidden layer: 512 neurons
-        // Output: 64*64 = 4096 possible moves
-        let ln1 = linear(832, 512, vb.pp("ln1"))?;
-        let ln2 = linear(512, 4096, vb.pp("ln2"))?;
+        // Output: 64*64 = 4096 possible moves ()
+        let ln1 = linear(13 * 8 * 8, 512, vb.pp("ln1"))?;
+        let ln2 = linear(512, 8 * 8 * 8 * 8, vb.pp("ln2"))?;
         Ok(Self { ln1, ln2 })
     }
 
