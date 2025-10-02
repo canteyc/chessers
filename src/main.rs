@@ -1,11 +1,12 @@
-mod mlp_model;
-
 use candle_core::{Device, Result, Tensor};
-use candle_nn::VarBuilder;
+use candle_nn::Module;
 use chess::{Board, BoardStatus, ChessMove, Color, File, MoveGen, Piece, Rank, Square};
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
-use mlp_model::Mlp;
 use rand::seq::IteratorRandom;
+use std::path::Path;
+
+use chessers::mlp::{load_model, Mlp};
+use chessers::{board_to_tensor, index_to_move, move_to_index};
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
@@ -37,14 +38,18 @@ struct ChessApp {
     white_player: Player,
     black_player: Player,
     mlp_model: Mlp,
+    model_status: String,
 }
 
 impl ChessApp {
     fn new() -> Self {
-        // Create a VarBuilder for model initialization
         let device = Device::Cpu;
-        let vb = VarBuilder::zeros(candle_core::DType::F32, &device);
-        let mlp_model = Mlp::new(vb).expect("Failed to create MLP model");
+        let model_path = Path::new("chess_mlp.safetensors");
+
+        let (mlp_model, model_status) = match load_model(model_path, &device) {
+            Ok(model) => (model, format!("Loaded model from: {}", model_path.display())),
+            Err(e) => panic!("Failed to load model: {}. Please run the training script first.", e),
+        };
 
         Self {
             board: Board::default(),
@@ -52,6 +57,7 @@ impl ChessApp {
             white_player: Player::Human, // Default to Human vs Bot
             black_player: Player::Bot(BotModel::Mlp),
             mlp_model,
+            model_status,
         }
     }
 
@@ -190,46 +196,6 @@ fn get_piece_char(piece: Piece, color: Color) -> char {
     if color == Color::White { char } else { char.to_lowercase().next().unwrap() }
 }
 
-/// Converts a `chess::Board` to a `candle_core::Tensor`.
-fn board_to_tensor(board: &Board, device: &Device) -> Result<Tensor> {
-    let mut planes = [0.0f32; 13 * 8 * 8];
-    let active_color = board.side_to_move();
-
-    // Piece planes
-    for i in 0..64 {
-        // This is safe because the loop guarantees `i` is always in the range 0..64.
-        let sq = unsafe {
-            Square::new(i)
-        };
-        if let Some(piece) = board.piece_on(sq) {
-            let color = board.color_on(sq).unwrap();
-            let piece_idx = piece.to_index();
-            let plane_idx = if color == Color::White { 0 } else { 6 };
-            let idx = (plane_idx + piece_idx) * 64 + (i as usize);
-            planes[idx] = 1.0;
-        }
-    }
-
-    // Active color plane
-    if active_color == Color::White {
-        for i in 0..64 {
-            planes[12 * 64 + i] = 1.0;
-        }
-    }
-
-    // Create a (13, 8, 8) tensor and then flatten it
-    Tensor::from_slice(&planes, (13, 8, 8), device)?.flatten_all()
-}
-
-/// Maps a `ChessMove` to a unique index from 0 to 4095.
-fn move_to_index(m: ChessMove) -> usize {
-    let from = m.get_source().to_index();
-    let to = m.get_dest().to_index();
-    // Note: This simple mapping doesn't account for promotions.
-    // A more advanced mapping would be needed for a full-featured engine.
-    from * 64 + to
-}
-
 impl eframe::App for ChessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -252,6 +218,7 @@ impl eframe::App for ChessApp {
             }
 
             ui.heading("Chessers");
+            ui.label(&self.model_status);
 
             // --- Game Status ---
             ui.horizontal(|ui| {
