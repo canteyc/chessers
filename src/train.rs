@@ -1,22 +1,21 @@
 use anyhow::Result;
-use candle_core::{Device, Tensor, DType};
+use candle_core::{Device, DType, Tensor};
 use candle_nn::{loss, AdamW, Module, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use chess::{Board, ChessMove, Color};
+use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
 use clap::Parser;
-use pgn_reader::{BufferedReader, SanPlus, Visitor};
 use rayon::prelude::*;
-use std::fs::File;
+use rand::seq::IteratorRandom;
 use std::path::PathBuf; use std::time::Instant;
 
-use chessers::mlp::Mlp;
-use chessers::{board_to_tensor, move_to_index};
+use chessers::model::UNet;
+use chessers::{board_to_tensor, index_to_move, move_to_index};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the PGN file for training.
-    #[arg(long)]
-    pgn_file: PathBuf,
+    /// Number of games to generate and train on per epoch.
+    #[arg(long, default_value_t = 1000)]
+    games_per_epoch: usize,
 
     /// Path to save the trained model weights.
     #[arg(long, default_value = "chess_mlp.safetensors")]
@@ -30,47 +29,92 @@ struct Args {
     #[arg(long, default_value_t = 1e-4)]
     learning_rate: f64,
 }
-/// A visitor that collects all board states and the subsequent move for a single game.
-/// It only collects positions where it is White's turn to move.
-struct GameDataCollector {
-    board: Board,
-    // Stores (board_state, resulting_move)
-    positions: Vec<(Board, ChessMove)>,
+
+#[derive(Debug, Clone, Copy)]
+enum GameResult {
+    WhiteWin,
+    BlackWin,
+    Draw,
 }
 
-impl GameDataCollector {
-    fn new() -> Self {
-        Self {
-            board: Board::default(),
-            positions: Vec::new(),
+/// Plays a full game of chess with the model playing against itself.
+/// Returns the game history and the result.
+fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Vec<(Board, ChessMove)>, GameResult)> {
+    let mut board = Board::default();
+    let mut game_history = Vec::new();
+    let mut move_count = 0;
+
+    loop {
+        if board.status() != BoardStatus::Ongoing || move_count > 200 { // Max moves to prevent infinite games
+            break;
+        }
+
+        let best_move = if rand::random::<f32>() < exploration_rate {
+            // Exploration: pick a random move
+            let moves = MoveGen::new_legal(&board);
+            moves.choose(&mut rand::thread_rng())
+        } else {
+            // Exploitation: use the model to find the best move
+            find_model_move(&board, model, device)
+        };
+
+        if let Some(chess_move) = best_move {
+            game_history.push((board, chess_move));
+            board = board.make_move_new(chess_move);
+            move_count += 1;
+        } else {
+            // No legal moves, game is over.
+            break;
         }
     }
-}
 
-impl Visitor for GameDataCollector {
-    // The return type of the visitor when it's done.
-    type Result = Result<Vec<(Board, ChessMove)>>;
-
-    fn san(&mut self, san: SanPlus) {
-        // We only train on positions where it's White's turn.
-        // A more robust model would handle both perspectives.
-        if let Ok(chess_move) = ChessMove::from_san(&self.board, &san.to_string()) {
-            if self.board.side_to_move() == Color::White {
-                self.positions.push((self.board, chess_move));
+    let result = match board.status() {
+        BoardStatus::Checkmate => {
+            if board.side_to_move() == Color::White {
+                GameResult::BlackWin
+            } else {
+                GameResult::WhiteWin
             }
-            // Apply the move to advance the board state for the next position.
-            self.board = self.board.make_move_new(chess_move);
+        }
+        _ => GameResult::Draw, // Stalemate, insufficient material, etc.
+    };
+
+    Ok((game_history, result))
+}
+
+/// Uses the MLP to find the best legal move from a given board state.
+fn find_model_move(board: &Board, model: &UNet, device: &Device) -> Option<ChessMove> {
+    let board_tensor = board_to_tensor(board, device).ok()?;
+    let logits = model.forward(&board_tensor);
+    if logits.is_err() {
+        eprintln!("Error during forward pass: {:?}", logits.err().unwrap());
+        return None;
+    }
+    let logits = logits.unwrap();
+
+    let mut best_move: Option<ChessMove> = None;
+    let mut max_logit = f32::NEG_INFINITY;
+
+    for m in MoveGen::new_legal(board) {
+        let move_index = move_to_index(m);
+        let move_logit = logits.get(0).ok()?.get(move_index).ok()?.to_scalar::<f32>().ok()?;
+        if move_logit > max_logit {
+            max_logit = move_logit;
+            best_move = Some(m);
         }
     }
-
-    fn end_game(&mut self) -> Self::Result {
-        // Return the collected positions, consuming the vec.
-        Ok(std::mem::take(&mut self.positions))
-    }
+    best_move
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // // --- Profiling Setup (pprof-rs) ---
+    // // This guard starts the profiler and will generate the report when it's dropped at the end of main.
+    // let guard = pprof::ProfilerGuardBuilder::default()
+    //     .frequency(1000) // Sample at 1000Hz
+    //     .blocklist(&["libc", "libgcc", "pthread", "vdso"]) // Exclude some low-level noise
+    //     .build()?;
 
     // Set the OPENBLAS_NUM_THREADS environment variable to 1.
     // This allows Rayon to manage the parallelism at a higher level.
@@ -87,58 +131,60 @@ fn main() -> Result<()> {
         varmap.load(&args.output_file)?;
     }
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
-    let model = Mlp::new(vb)?;
-    let mut optimizer = AdamW::new(model.vars(), ParamsAdamW { lr: args.learning_rate , beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.0 })?;
+    let model = UNet::new(vb)?;
+    let mut optimizer = AdamW::new(varmap.all_vars(), ParamsAdamW { lr: args.learning_rate , beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.0 })?;
 
     println!(
         "Training with {} epochs and a learning rate of {}.",
         args.epochs, args.learning_rate
     );
 
-    const BATCH_SIZE: usize = 1024 * 32; // Number of positions per batch
-    const EPOCH_SIZE: usize = 16; // Number of batches per epoch
+    const BATCH_SIZE: usize = 1024 * 4; // Number of positions per training batch
 
     // 2. Training loop
     for epoch in 0..args.epochs {
-        // We re-open the file for each epoch to iterate from the beginning.
-        let pgn_file = File::open(&args.pgn_file)?;
-        let mut reader = BufferedReader::new(pgn_file);
+        let epoch_start_time = Instant::now();
+        println!("--- Starting Epoch {}/{} ---", epoch + 1, args.epochs);
 
+        // --- Data Generation Phase ---
+        let data_gen_start = Instant::now();
+        let games_data: Vec<_> = (0..args.games_per_epoch)
+            .into_par_iter()
+            .map(|_| {
+                // Anneal exploration rate over epochs
+                let exploration_rate = (0.5 * (1.0 - (epoch as f32 / args.epochs as f32))).max(0.1);
+                play_game(&model, &device, exploration_rate).unwrap()
+            })
+            .collect();
+        let data_gen_duration = data_gen_start.elapsed();
+
+        // We only train on moves from the winning side.
+        let training_positions: Vec<_> = games_data
+            .into_iter()
+            .flat_map(|(history, result)| {
+                let winner_color = match result {
+                    GameResult::WhiteWin => Some(Color::White),
+                    GameResult::BlackWin => Some(Color::Black),
+                    GameResult::Draw => None,
+                };
+                history
+                    .into_iter()
+                    .filter(move |(b, _)| Some(b.side_to_move()) == winner_color)
+            })
+            .collect();
+
+        let total_moves_in_epoch = training_positions.len();
+        if total_moves_in_epoch == 0 {
+            println!("No winning moves to train on this epoch. Skipping.");
+            continue;
+        }
+
+        println!("Generated {} games ({} winning moves) in {:?}", args.games_per_epoch, total_moves_in_epoch, data_gen_duration);
+        
         let mut total_epoch_loss = 0.0;
-        let mut total_moves_in_epoch = 0;
-        let mut batch_num = 0;
-
-        loop {
-            // --- Data Collection Phase ---
-            let data_loading_start = Instant::now();
-            let mut batch_positions = Vec::with_capacity(BATCH_SIZE);
-            let mut eof = false;
-            while batch_positions.len() < BATCH_SIZE {
-                let mut collector = GameDataCollector::new();
-                match reader.read_game(&mut collector)? {
-                    Some(Ok(game_positions)) if !game_positions.is_empty() => {
-                        batch_positions.extend(game_positions);
-                    }
-                    Some(_) => {} // Skip empty or failed games
-                    None => {
-                        eof = true;
-                        break;
-                    } // End of file
-                }
-            }
-            let data_loading_duration = data_loading_start.elapsed();
-
-            if batch_positions.is_empty() {
-                break; // No more positions to process
-            }
-
-            let moves_in_batch = batch_positions.len();
-            total_moves_in_epoch += moves_in_batch;
-            batch_num += 1;
-
+        for (batch_num, batch) in training_positions.chunks(BATCH_SIZE).enumerate() {
             // --- Parallel Processing and Gradient Accumulation ---
-            let tensor_conv_start = Instant::now();
-            let (board_tensors, target_indices): (Vec<_>, Vec<_>) = batch_positions
+            let (board_tensors, target_indices): (Vec<_>, Vec<_>) = batch
                 .par_iter()
                 .map(|(board, chess_move)| {
                     let board_tensor = board_to_tensor(board, &device).expect("Failed to convert board to tensor");
@@ -146,36 +192,29 @@ fn main() -> Result<()> {
                     (board_tensor, move_index)
                 })
                 .unzip();
-            let tensor_conv_duration = tensor_conv_start.elapsed();
 
-            let forward_pass_start = Instant::now();
             let input_tensor = Tensor::stack(&board_tensors, 0)?;
             let logits = model.forward(&input_tensor)?;
-            let forward_pass_duration = forward_pass_start.elapsed();
 
-            let loss_start = Instant::now();
             let targets_tensor = Tensor::new(target_indices.as_slice(), &device)?;
             let total_loss = loss::cross_entropy(&logits, &targets_tensor)?;
-            let loss_duration = loss_start.elapsed();
 
-            let loss_backward_start = Instant::now();
             optimizer.backward_step(&total_loss)?;
-            let loss_backward_duration = loss_backward_start.elapsed();
 
-            println!(
-                "Batch {:<5} | Positions: {:<4} | Data: {:<10?} | Tensors: {:<10?} | Forward: {:<10?} | Loss: {:<10?} | Backward: {:<10?}",
-                batch_num, moves_in_batch, data_loading_duration, tensor_conv_duration, forward_pass_duration, loss_duration, loss_backward_duration
-            );
+            let batch_loss = total_loss.to_scalar::<f32>()?;
+            total_epoch_loss += batch_loss;
 
-            total_epoch_loss += total_loss.to_scalar::<f32>()?;
-
-            if eof || batch_num >= EPOCH_SIZE {
-                break;
+            if (batch_num + 1) % 10 == 0 {
+                println!(
+                    "  Batch {:<5} | Positions: {:<4} | Loss: {:.5}",
+                    batch_num + 1, batch.len(), batch_loss / batch.len() as f32
+                );
             }
         }
 
         let avg_loss = total_epoch_loss / total_moves_in_epoch as f32;
-        println!( "Epoch: {:4} | Batches: {:5} | Avg Loss: {:8.5}", epoch + 1, batch_num, avg_loss);
+        let epoch_duration = epoch_start_time.elapsed();
+        println!( "Epoch: {:4} | Avg Loss: {:8.5} | Duration: {:?}", epoch + 1, avg_loss, epoch_duration);
 
         println!("Saving model after epoch {} to {:?}", epoch + 1, args.output_file);
         varmap.save(&args.output_file)?;
@@ -183,6 +222,16 @@ fn main() -> Result<()> {
 
     println!("Training complete. Saving model to {:?}", args.output_file);
     varmap.save(&args.output_file)?;
+
+    // // --- Profiling Report Generation ---
+    // if let Ok(report) = guard.report().build() {
+    //     println!("Generating flamegraph to flamegraph.svg...");
+    //     let file = std::fs::File::create("flamegraph.svg")?;
+    //     let mut options = pprof::flamegraph::Options::default();
+    //     options.image_width = Some(2400); // Set a custom width
+    //     options.title = "Chessers Training Flamegraph".to_string();
+    //     report.flamegraph_with_options(file, &mut options)?;
+    // }
 
     Ok(())
 }

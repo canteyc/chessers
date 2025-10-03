@@ -1,4 +1,4 @@
-pub mod mlp;
+pub mod model;
 
 use candle_core::{Device, Result, Tensor};
 use chess::{Board, ChessMove, Color, File, Piece, Rank, Square};
@@ -29,7 +29,7 @@ pub fn board_to_tensor(board: &Board, device: &Device) -> Result<Tensor> {
     }
 
     // Create a (13, 8, 8) tensor and then flatten it
-    Tensor::from_slice(&planes, (13, 8, 8), device)?.flatten_all()
+    Tensor::from_slice(&planes, (13, 8, 8), device)
 }
 
 /// Maps a `ChessMove` to a unique index from 0 to 4095.

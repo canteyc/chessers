@@ -4,8 +4,8 @@ use chess::{Board, BoardStatus, ChessMove, Color, File, MoveGen, Piece, Rank, Sq
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
 use rand::seq::IteratorRandom;
 use std::path::Path;
-
-use chessers::mlp::{load_model, Mlp};
+ 
+use chessers::model::{load_model, UNet};
 use chessers::{board_to_tensor, index_to_move, move_to_index};
 
 fn main() {
@@ -28,7 +28,7 @@ enum Player {
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BotModel {
     Random,
-    Mlp,
+    UNet,
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -37,7 +37,8 @@ struct ChessApp {
     selected_square: Option<Square>,
     white_player: Player,
     black_player: Player,
-    mlp_model: Mlp,
+    model: UNet,
+    promotion_move: Option<(Square, Square)>,
     model_status: String,
 }
 
@@ -46,7 +47,7 @@ impl ChessApp {
         let device = Device::Cpu;
         let model_path = Path::new("chess_mlp.safetensors");
 
-        let (mlp_model, model_status) = match load_model(model_path, &device) {
+        let (model, model_status) = match load_model(model_path, &device) {
             Ok(model) => (model, format!("Loaded model from: {}", model_path.display())),
             Err(e) => panic!("Failed to load model: {}. Please run the training script first.", e),
         };
@@ -54,10 +55,11 @@ impl ChessApp {
         Self {
             board: Board::default(),
             selected_square: None,
-            white_player: Player::Bot(BotModel::Mlp), // Default to Human vs Bot
+            white_player: Player::Bot(BotModel::UNet), // Default to Human vs Bot
             // white_player: Player::Human, // Default to Human vs Bot
-            black_player: Player::Bot(BotModel::Random),
-            mlp_model,
+            black_player: Player::Human,
+            model,
+            promotion_move: None,
             model_status,
         }
     }
@@ -66,7 +68,7 @@ impl ChessApp {
     fn make_bot_move(&mut self, model: BotModel) {
         let best_move = match model {
             BotModel::Random => self.find_random_move(),
-            BotModel::Mlp => self.find_mlp_move(),
+            BotModel::UNet => self.find_model_move(),
         };
 
         if let Some(chess_move) = best_move {
@@ -80,13 +82,13 @@ impl ChessApp {
         moves.choose(&mut rand::thread_rng())
     }
 
-    /// Bot implementation: uses a (placeholder) MLP to pick a move.
-    fn find_mlp_move(&self) -> Option<ChessMove> {
+    /// Bot implementation: uses a UNet  to pick a move.
+    fn find_model_move(&self) -> Option<ChessMove> {
         // 1. Convert board to tensor
         let board_tensor = board_to_tensor(&self.board, &Device::Cpu).ok()?;
 
         // 2. --- FORWARD PASS ---
-        let logits = self.mlp_model.forward(&board_tensor).ok()?;
+        let logits = self.model.forward(&board_tensor).ok()?;
 
         // 3. Find the best legal move according to the logits
         let mut best_move: Option<ChessMove> = None;
@@ -95,7 +97,7 @@ impl ChessApp {
         let legal_moves = MoveGen::new_legal(&self.board);
         for m in legal_moves {
             let move_index = move_to_index(m);
-            let move_logit = logits.get(move_index).unwrap().to_scalar::<f32>().unwrap();
+            let move_logit = logits.get(0).ok()?.get(move_index).ok()?.to_scalar::<f32>().ok()?;
 
             if move_logit > max_logit {
                 max_logit = move_logit;
@@ -103,7 +105,7 @@ impl ChessApp {
             }
         }
 
-        println!("MLP Bot chose move: {:?} with score: {}", best_move, max_logit);
+        println!("Bot chose move: {:?} with score: {}", best_move, max_logit);
         best_move
     }
 
@@ -161,15 +163,26 @@ impl ChessApp {
 
                     if let Some(start_square) = self.selected_square {
                         // This is the second click (destination)
-                        // Note: We don't handle promotions here yet.
-                        let chess_move = ChessMove::new(start_square, clicked_square, None);
+                        let piece = self.board.piece_on(start_square).unwrap();
+                        let rank = clicked_square.get_rank();
 
-                        // Check if the move is legal and make it
-                        if self.board.legal(chess_move) {
-                            self.board = self.board.make_move_new(chess_move);
+                        // Check if it's a promotion move
+                        if piece == Piece::Pawn && (rank == Rank::First || rank == Rank::Eighth) {
+                            // It's a promotion, so we set the state to ask the user for the piece.
+                            self.promotion_move = Some((start_square, clicked_square));
+                        } else {
+                            // It's a regular move.
+                            let chess_move = ChessMove::new(start_square, clicked_square, None);
+                            if self.board.legal(chess_move) {
+                                self.board = self.board.make_move_new(chess_move);
+                            }
                         }
 
                         // Deselect after attempting a move
+                        self.selected_square = None;
+                    } else if self.promotion_move.is_some() {
+                        // A promotion choice is pending, don't allow other moves.
+                        // You could add feedback to the user here if desired.
                         self.selected_square = None;
                     } else {
                         // This is the first click (source)
@@ -243,5 +256,30 @@ impl eframe::App for ChessApp {
                 self.board = Board::default();
             }
         });
+
+        // --- Promotion UI ---
+        if let Some((start, end)) = self.promotion_move {
+            egui::Window::new("Pawn Promotion")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label("Promote to:");
+                    ui.horizontal(|ui| {
+                        let pieces = [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight];
+                        for piece in pieces {
+                            if ui.button(get_piece_char(piece, self.board.side_to_move()).to_string()).clicked() {
+                                let chess_move = ChessMove::new(start, end, Some(piece));
+                                if self.board.legal(chess_move) {
+                                    self.board = self.board.make_move_new(chess_move);
+                                }
+                                // Close the promotion window
+                                self.promotion_move = None;
+                                break;
+                            }
+                        }
+                    });
+                });
+        }
     }
 }
