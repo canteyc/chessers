@@ -1,5 +1,5 @@
 use candle_core::{Result, Tensor, Var};
-use candle_nn::{conv2d, Conv2d, Conv2dConfig, Module, VarBuilder};
+use candle_nn::{conv2d, linear, Conv2d, Conv2dConfig, Linear, Module, VarBuilder};
 use std::path::Path;
 
 #[derive(Debug)]
@@ -10,6 +10,10 @@ pub struct UNet {
     res_block1: ResBlock,
     res_block2: ResBlock,
     conv_out: Conv2d,
+
+    // Value head
+    value_conv: Conv2d,
+    value_ln1: Linear,
 }
 
 #[derive(Debug)]
@@ -44,12 +48,19 @@ impl UNet {
         let res_block1 = ResBlock::new(CHANNELS, vb.pp("res1"))?;
         let res_block2 = ResBlock::new(CHANNELS, vb.pp("res2"))?;
         // The output has 64 channels, one for each "to" square.
-        let conv_out = conv2d(CHANNELS, 64, 1, Default::default(), vb.pp("out"))?;
+        let conv_out = conv2d(CHANNELS, 64, 1, Default::default(), vb.pp("policy_out"))?;
+
+        // Value head layers
+        let value_conv = conv2d(CHANNELS, 1, 1, Default::default(), vb.pp("v_conv1"))?;
+        let value_ln1 = linear(8 * 8, 1, vb.pp("v_ln1"))?;
+
         Ok(Self {
             conv_in,
             res_block1,
             res_block2,
             conv_out,
+            value_conv,
+            value_ln1,
         })
     }
 
@@ -57,7 +68,7 @@ impl UNet {
 
 impl Module for UNet {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        // Handle both single (3D) and batched (4D) inputs.
+        // This model now returns two heads. We'll separate them later.
         let xs = if xs.rank() == 3 {
             xs.unsqueeze(0)?
         } else {
@@ -65,14 +76,22 @@ impl Module for UNet {
         };
         let b_sz = xs.dim(0)?;
         let xs = self.conv_in.forward(&xs)?.relu()?;
-        let xs = self.res_block1.forward(&xs)?;
-        let xs = self.res_block2.forward(&xs)?;
-        let xs = self.conv_out.forward(&xs)?;
-        // The output shape is (b_sz, 64, 8, 8). This represents, for each of the 64 "from" squares (as an 8x8 grid),
-        // a value for each of the 64 "to" squares.
-        // We need to reshape this to match our `move_to_index` logic, which is `from * 64 + to`.
-        let xs = xs.reshape((b_sz, 64, 64))?; // (b_sz, from_square, to_square)
-        xs.flatten_from(1) // (b_sz, 4096)
+        let res1 = self.res_block1.forward(&xs)?;
+        let res2 = self.res_block2.forward(&res1)?;
+
+        // --- Policy Head ---
+        let policy_logits = self.conv_out.forward(&res2)?;
+        let policy_logits = policy_logits.reshape((b_sz, 64, 64))?;
+        let policy_logits = policy_logits.flatten_from(1)?; // Shape: (b_sz, 4096)
+
+        // --- Value Head ---
+        let value = self.value_conv.forward(&res2)?.relu()?;
+        let value = value.flatten_from(1)?; // Shape: (b_sz, 64)
+        let value = self.value_ln1.forward(&value)?.tanh()?; // Shape: (b_sz, 1)
+
+        // We concatenate the two heads for simplicity in training and inference.
+        // The first 4096 elements are policy, the last element is value.
+        Tensor::cat(&[&policy_logits, &value], 1)
     }
 }
 

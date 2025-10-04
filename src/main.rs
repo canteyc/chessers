@@ -57,6 +57,7 @@ impl ChessApp {
             selected_square: None,
             white_player: Player::Bot(BotModel::UNet), // Default to Human vs Bot
             // white_player: Player::Human, // Default to Human vs Bot
+            // black_player: Player::Bot(BotModel::Random),
             black_player: Player::Human,
             model,
             promotion_move: None,

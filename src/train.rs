@@ -1,5 +1,5 @@
 use anyhow::Result;
-use candle_core::{Device, DType, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{loss, AdamW, Module, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
 use clap::Parser;
@@ -60,6 +60,15 @@ fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Ve
 
         if let Some(chess_move) = best_move {
             game_history.push((board, chess_move));
+            // check for a three-move draw (both sides have made the same moves for the last 3 turns)
+            if move_count >= 6 
+             && game_history.get(move_count - 1) == game_history.get(move_count - 3)
+             && game_history.get(move_count - 3) == game_history.get(move_count - 5)
+             && game_history.get(move_count - 2) == game_history.get(move_count - 4)
+             && game_history.get(move_count - 4) == game_history.get(move_count - 6)
+             {
+                break;
+            }
             board = board.make_move_new(chess_move);
             move_count += 1;
         } else {
@@ -85,12 +94,18 @@ fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Ve
 /// Uses the MLP to find the best legal move from a given board state.
 fn find_model_move(board: &Board, model: &UNet, device: &Device) -> Option<ChessMove> {
     let board_tensor = board_to_tensor(board, device).ok()?;
-    let logits = model.forward(&board_tensor);
-    if logits.is_err() {
-        eprintln!("Error during forward pass: {:?}", logits.err().unwrap());
-        return None;
-    }
-    let logits = logits.unwrap();
+    let output = match model.forward(&board_tensor) {
+        Ok(tensor) => tensor,
+        Err(e) => {
+            eprintln!("Error during forward pass: {:?}", e);
+            return None;
+        }
+    };
+
+    // The first 4096 elements are policy logits
+    let logits = output.i((.., ..4096)).ok()?;
+    // The last element is the value. We get it at index (0, 4096) to get a scalar.
+    let value = output.get(0).ok()?.get(4096).ok()?.to_scalar::<f32>().ok()?;
 
     let mut best_move: Option<ChessMove> = None;
     let mut max_logit = f32::NEG_INFINITY;
@@ -102,6 +117,12 @@ fn find_model_move(board: &Board, model: &UNet, device: &Device) -> Option<Chess
             max_logit = move_logit;
             best_move = Some(m);
         }
+    }
+
+    // If the model thinks the position is a dead loss, it might not find a move.
+    // In that case, pick a random one to avoid getting stuck.
+    if best_move.is_none() {
+        return MoveGen::new_legal(board).choose(&mut rand::thread_rng());
     }
     best_move
 }
@@ -159,45 +180,58 @@ fn main() -> Result<()> {
         let data_gen_duration = data_gen_start.elapsed();
 
         // We only train on moves from the winning side.
-        let training_positions: Vec<_> = games_data
+        let training_data: Vec<_> = games_data
             .into_iter()
             .flat_map(|(history, result)| {
-                let winner_color = match result {
-                    GameResult::WhiteWin => Some(Color::White),
-                    GameResult::BlackWin => Some(Color::Black),
-                    GameResult::Draw => None,
+                let outcome_value = match result {
+                    GameResult::WhiteWin => 1.0f32,
+                    GameResult::BlackWin => -1.0f32,
+                    GameResult::Draw => 0.0f32,
                 };
                 history
                     .into_iter()
-                    .filter(move |(b, _)| Some(b.side_to_move()) == winner_color)
+                    .map(move |(b, m)| (b, m, if b.side_to_move() == Color::White { outcome_value } else { -outcome_value }))
             })
             .collect();
 
-        let total_moves_in_epoch = training_positions.len();
+        let total_moves_in_epoch = training_data.len();
         if total_moves_in_epoch == 0 {
-            println!("No winning moves to train on this epoch. Skipping.");
+            println!("No positions to train on this epoch. Skipping.");
             continue;
         }
 
-        println!("Generated {} games ({} winning moves) in {:?}", args.games_per_epoch, total_moves_in_epoch, data_gen_duration);
+        println!("Generated {} games ({} positions) in {:?}", args.games_per_epoch, total_moves_in_epoch, data_gen_duration);
         
         let mut total_epoch_loss = 0.0;
-        for (batch_num, batch) in training_positions.chunks(BATCH_SIZE).enumerate() {
+        for (batch_num, batch) in training_data.chunks(BATCH_SIZE).enumerate() {
             // --- Parallel Processing and Gradient Accumulation ---
-            let (board_tensors, target_indices): (Vec<_>, Vec<_>) = batch
+            let (board_tensors, target_indices, target_values): (Vec<_>, Vec<_>, Vec<_>) = batch
                 .par_iter()
-                .map(|(board, chess_move)| {
+                .map(|(board, chess_move, value)| {
                     let board_tensor = board_to_tensor(board, &device).expect("Failed to convert board to tensor");
                     let move_index = move_to_index(*chess_move) as u32;
-                    (board_tensor, move_index)
+                    (board_tensor, move_index, *value)
                 })
-                .unzip();
+                .collect::<Vec<_>>()
+                .into_iter()
+                .fold((Vec::new(), Vec::new(), Vec::new()), |mut acc, (b, m, v)| {
+                    acc.0.push(b);
+                    acc.1.push(m);
+                    acc.2.push(v);
+                    acc
+                });
 
             let input_tensor = Tensor::stack(&board_tensors, 0)?;
-            let logits = model.forward(&input_tensor)?;
+            let output = model.forward(&input_tensor)?;
+            let policy_logits = output.i((.., ..4096))?;
+            let value_preds = output.i((.., 4096..))?.squeeze(1)?;
 
-            let targets_tensor = Tensor::new(target_indices.as_slice(), &device)?;
-            let total_loss = loss::cross_entropy(&logits, &targets_tensor)?;
+            let policy_targets = Tensor::new(target_indices.as_slice(), &device)?;
+            let value_targets = Tensor::new(target_values.as_slice(), &device)?;
+
+            let policy_loss = loss::cross_entropy(&policy_logits, &policy_targets)?;
+            let value_loss = loss::mse(&value_preds, &value_targets)?;
+            let total_loss = (policy_loss.to_device(&device)? + value_loss.to_device(&device)?)?;
 
             optimizer.backward_step(&total_loss)?;
 
