@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor, Var};
+use candle_core::{Result, Tensor};
 use candle_nn::{conv2d, linear, Conv2d, Conv2dConfig, Linear, Module, VarBuilder};
 use std::path::Path;
 
@@ -74,14 +74,14 @@ impl Module for UNet {
         } else {
             xs.clone()
         };
-        let b_sz = xs.dim(0)?;
         let xs = self.conv_in.forward(&xs)?.relu()?;
         let res1 = self.res_block1.forward(&xs)?;
         let res2 = self.res_block2.forward(&res1)?;
 
         // --- Policy Head ---
         let policy_logits = self.conv_out.forward(&res2)?;
-        let policy_logits = policy_logits.reshape((b_sz, 64, 64))?;
+        // Apply log_softmax for numerical stability with cross_entropy loss
+        let policy_logits = candle_nn::ops::log_softmax(&policy_logits, 1)?;
         let policy_logits = policy_logits.flatten_from(1)?; // Shape: (b_sz, 4096)
 
         // --- Value Head ---

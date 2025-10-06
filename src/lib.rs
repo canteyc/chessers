@@ -1,7 +1,7 @@
 pub mod model;
 
 use candle_core::{Device, Result, Tensor};
-use chess::{Board, ChessMove, Color, File, Piece, Rank, Square};
+use chess::{Board, ChessMove, Color, Square};
 
 /// Converts a `chess::Board` to a `candle_core::Tensor`.
 pub fn board_to_tensor(board: &Board, device: &Device) -> Result<Tensor> {

@@ -1,4 +1,4 @@
-use candle_core::{Device, Result, Tensor};
+use candle_core::{Device};
 use candle_nn::Module;
 use chess::{Board, BoardStatus, ChessMove, Color, File, MoveGen, Piece, Rank, Square};
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
@@ -6,7 +6,7 @@ use rand::seq::IteratorRandom;
 use std::path::Path;
  
 use chessers::model::{load_model, UNet};
-use chessers::{board_to_tensor, index_to_move, move_to_index};
+use chessers::{board_to_tensor, move_to_index};
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
