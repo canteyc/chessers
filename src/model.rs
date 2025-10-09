@@ -44,7 +44,7 @@ impl UNet {
     pub fn new(vb: VarBuilder) -> Result<Self> {
         const CHANNELS: usize = 64;
         let conv_cfg = Conv2dConfig { padding: 1, ..Default::default() };
-        let conv_in = conv2d(13, CHANNELS, 3, conv_cfg, vb.pp("in"))?;
+        let conv_in = conv2d(6, CHANNELS, 3, conv_cfg, vb.pp("in"))?;
         let res_block1 = ResBlock::new(CHANNELS, vb.pp("res1"))?;
         let res_block2 = ResBlock::new(CHANNELS, vb.pp("res2"))?;
         // The output has 64 channels, one for each "to" square.
@@ -80,8 +80,6 @@ impl Module for UNet {
 
         // --- Policy Head ---
         let policy_logits = self.conv_out.forward(&res2)?;
-        // Apply log_softmax for numerical stability with cross_entropy loss
-        let policy_logits = candle_nn::ops::log_softmax(&policy_logits, 1)?;
         let policy_logits = policy_logits.flatten_from(1)?; // Shape: (b_sz, 4096)
 
         // --- Value Head ---

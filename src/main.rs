@@ -1,12 +1,10 @@
 use candle_core::{Device};
-use candle_nn::Module;
 use chess::{Board, BoardStatus, ChessMove, Color, File, MoveGen, Piece, Rank, Square};
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
 use rand::seq::IteratorRandom;
 use std::path::Path;
  
-use chessers::model::{load_model, UNet};
-use chessers::{board_to_tensor, move_to_index};
+use chessers::{find_best_move_with_search, model::{load_model, UNet}};
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
@@ -45,7 +43,7 @@ struct ChessApp {
 impl ChessApp {
     fn new() -> Self {
         let device = Device::Cpu;
-        let model_path = Path::new("chess_mlp.safetensors");
+        let model_path = Path::new("chess_6.safetensors");
 
         let (model, model_status) = match load_model(model_path, &device) {
             Ok(model) => (model, format!("Loaded model from: {}", model_path.display())),
@@ -85,29 +83,7 @@ impl ChessApp {
 
     /// Bot implementation: uses a UNet  to pick a move.
     fn find_model_move(&self) -> Option<ChessMove> {
-        // 1. Convert board to tensor
-        let board_tensor = board_to_tensor(&self.board, &Device::Cpu).ok()?;
-
-        // 2. --- FORWARD PASS ---
-        let logits = self.model.forward(&board_tensor).ok()?;
-
-        // 3. Find the best legal move according to the logits
-        let mut best_move: Option<ChessMove> = None;
-        let mut max_logit = f32::NEG_INFINITY;
-
-        let legal_moves = MoveGen::new_legal(&self.board);
-        for m in legal_moves {
-            let move_index = move_to_index(m);
-            let move_logit = logits.get(0).ok()?.get(move_index).ok()?.to_scalar::<f32>().ok()?;
-
-            if move_logit > max_logit {
-                max_logit = move_logit;
-                best_move = Some(m);
-            }
-        }
-
-        println!("Bot chose move: {:?} with score: {}", best_move, max_logit);
-        best_move
+        find_best_move_with_search(&self.board, &self.model, &Device::Cpu)
     }
 
     /// Draws the board and handles user input.

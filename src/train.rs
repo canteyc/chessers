@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use chessers::model::UNet;
-use chessers::{board_to_tensor, move_to_index};
+use chessers::{board_to_small_tensor, find_best_move_with_search, model::UNet};
+use chessers::{move_to_index};
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
 
 #[derive(Parser, Debug)]
@@ -20,7 +20,7 @@ struct Args {
     games_per_epoch: usize,
 
     /// Path to save the trained model weights.
-    #[arg(long, default_value = "chess_mlp.safetensors")]
+    #[arg(long, default_value = "chess_6.safetensors")]
     output_file: PathBuf,
 
     /// Number of epochs to train for.
@@ -105,7 +105,7 @@ fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Ve
             moves.choose(&mut rand::thread_rng())
         } else {
             // Exploitation: use the model to find the best move
-            find_model_move(&board, model, device)
+            find_best_move_with_search(&board, model, device)
         };
 
         if let Some(chess_move) = best_move {
@@ -130,34 +130,6 @@ fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Ve
     };
 
     Ok((game_history, result))
-}
-
-/// Uses the MLP to find the best legal move from a given board state.
-fn find_model_move(board: &Board, model: &UNet, device: &Device) -> Option<ChessMove> {
-    let board_tensor = board_to_tensor(board, device).ok()?;
-    let output = match model.forward(&board_tensor) {
-        Ok(tensor) => tensor,
-        Err(e) => {
-            eprintln!("Error during forward pass: {:?}", e);
-            return None;
-        }
-    };
-
-    // The first 4096 elements are policy logits
-    let logits = output.i((.., ..4096)).ok()?;
-    let mut best_move: Option<ChessMove> = None;
-    let mut max_logit = f32::NEG_INFINITY;
-
-    for m in MoveGen::new_legal(board) {
-        let move_index = move_to_index(m);
-        let move_logit = logits.get(0).ok()?.get(move_index).ok()?.to_scalar::<f32>().ok()?;
-        if move_logit > max_logit {
-            max_logit = move_logit;
-            best_move = Some(m);
-        }
-    }
-
-    best_move
 }
 
 /// Loads training data from a PGN file.
@@ -291,7 +263,7 @@ fn main() -> Result<()> {
                 let (board_tensors, target_indices, target_values): (Vec<_>, Vec<_>, Vec<_>) = batch
                     .par_iter()
                     .map(|(board, chess_move, value)| {
-                        let board_tensor = board_to_tensor(board, &device).expect("Failed to convert board to tensor");
+                        let board_tensor = board_to_small_tensor(board, &device).expect("Failed to convert board to tensor");
                         let move_index = move_to_index(*chess_move) as u32;
                         (board_tensor, move_index, *value)
                     })
@@ -312,7 +284,9 @@ fn main() -> Result<()> {
                 let policy_targets = Tensor::new(target_indices.as_slice(), &device)?;
                 let value_targets = Tensor::new(target_values.as_slice(), &device)?;
 
-                let policy_loss = loss::cross_entropy(&policy_logits, &policy_targets)?;
+                // Apply log_softmax here before calculating cross_entropy loss
+                let policy_logits_sm = candle_nn::ops::log_softmax(&policy_logits, 1)?;
+                let policy_loss = loss::cross_entropy(&policy_logits_sm, &policy_targets)?;
                 let value_loss = loss::mse(&value_preds, &value_targets)?;
                 let total_loss = (policy_loss.to_device(&device)? + value_loss.to_device(&device)?)?;
 
