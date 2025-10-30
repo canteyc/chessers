@@ -1,0 +1,40 @@
+[Event "Human vs Bot"]
+[Site "Local"]
+[Date "2025.10.28"]
+[Round "-"]
+[White "Bot (UNet)"]
+[Black "Human"]
+[Result "0-1"]
+
+1. b2b4 e7e5 2. d2d4 d8g5 3. b4b5 f8b4 4. b1c3 b4c3 5. d1d2 c3d2 6. e1d1 d2c1 7. d4d5 g5d2 0-1
+
+[Event "Human vs Bot"]
+[Site "Local"]
+[Date "2025.10.28"]
+[Round "-"]
+[White "Bot (UNet)"]
+[Black "Human"]
+[Result "0-1"]
+
+1. e2e4 e7e5 2. b1a3 f8c5 3. c2c4 d8f6 4. a3c2 f6f2 0-1
+
+[Event "Human vs Bot"]
+[Site "Local"]
+[Date "2025.10.28"]
+[Round "-"]
+[White "Bot (UNet)"]
+[Black "Human"]
+[Result "0-1"]
+
+1. g1f3 e7e5 2. b2b3 f8c5 3. h2h3 d8h4 4. h1h2 h4f2 0-1
+
+[Event "Human vs Bot"]
+[Site "Local"]
+[Date "2025.10.28"]
+[Round "-"]
+[White "Bot (UNet)"]
+[Black "Human"]
+[Result "0-1"]
+
+1. b2b4 e7e5 2. c2c3 d8h4 3. d1c2 f8c5 4. h2h3 h4f2 5. e1d1 f2f1 0-1
+

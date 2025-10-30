@@ -1,12 +1,14 @@
 # Chessers
 
-Chess bot using a convolutional network on a 13-channel bitboard to predict optimal moves
+Chess bot using a convolutional network to predict optimal moves.
 
 ## Concept
 
 ### Bot Design
-On each turn, the board position is converted to a 13-channel bitboard recording the positions of every piece.
-Each type of piece is given a channel for white and a channel for black, then the 13th channel is all 1s during white's turn and all 0s during black's turn.
+On each turn, the board position is converted to a 6-channel tensor from the perspective of the current player.
+Each of the 6 piece types (Pawn, Knight, Bishop, Rook, Queen, King) gets its own 8x8 channel.
+On each channel, friendly pieces are marked as `1.0` and opponent pieces are marked as `-1.0`.
+When it is Black's turn, the board is flipped vertically so the model always "sees" the board from the perspective of the player to move.
 The network output is a 4097 length array. The last value is a value estimate of how likely this side is to win the game.
 The other values are a flattened 64*64 grid of weights for moving from each square to another square.
 Together, the output array can be applied to every legal move to find the highest scoring move.

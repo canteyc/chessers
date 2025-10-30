@@ -3,8 +3,10 @@ use chess::{Board, BoardStatus, ChessMove, Color, File, MoveGen, Piece, Rank, Sq
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
 use rand::seq::IteratorRandom;
 use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
  
-use chessers::{find_best_move_with_search, model::{load_model, UNet}};
+use chessers::{find_best_move_with_search, model::{load_model, UNet}, simple_bot::find_simple_move};
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
@@ -27,6 +29,7 @@ enum Player {
 pub enum BotModel {
     Random,
     UNet,
+    Simple,
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -38,6 +41,7 @@ struct ChessApp {
     model: UNet,
     promotion_move: Option<(Square, Square)>,
     model_status: String,
+    game_history: Vec<ChessMove>,
 }
 
 impl ChessApp {
@@ -53,13 +57,22 @@ impl ChessApp {
         Self {
             board: Board::default(),
             selected_square: None,
-            white_player: Player::Bot(BotModel::UNet), // Default to Human vs Bot
+            white_player: Player::Bot(BotModel::Simple), // Default to Human vs Bot
             // white_player: Player::Human, // Default to Human vs Bot
             // black_player: Player::Bot(BotModel::Random),
             black_player: Player::Human,
             model,
             promotion_move: None,
             model_status,
+            game_history: Vec::new(),
+        }
+    }
+
+    /// Gets the `Player` whose turn it is.
+    fn current_player(&self) -> &Player {
+        match self.board.side_to_move() {
+            Color::White => &self.white_player,
+            Color::Black => &self.black_player,
         }
     }
 
@@ -68,11 +81,51 @@ impl ChessApp {
         let best_move = match model {
             BotModel::Random => self.find_random_move(),
             BotModel::UNet => self.find_model_move(),
+            BotModel::Simple => find_simple_move(&self.board),
         };
 
         if let Some(chess_move) = best_move {
             self.board = self.board.make_move_new(chess_move);
+            self.game_history.push(chess_move);
         }
+    }
+
+    /// Saves the current game history to a PGN file.
+    fn save_game_to_pgn(&self) -> std::io::Result<()> {
+        let mut file = OpenOptions::new().append(true).create(true).open("human_games.pgn")?;
+
+        let result_str = match self.board.status() {
+            BoardStatus::Checkmate => if self.board.side_to_move() == Color::White { "0-1" } else { "1-0" },
+            BoardStatus::Stalemate => "1/2-1/2",
+            _ => "*", // Game is ongoing or drawn by other means
+        };
+
+        // Write PGN headers
+        writeln!(file, "[Event \"Human vs Bot\"]")?;
+        writeln!(file, "[Site \"Local\"]")?;
+        writeln!(file, "[Date \"{}\"]", chrono::Local::now().format("%Y.%m.%d"))?;
+        writeln!(file, "[Round \"-\"]")?;
+        writeln!(file, "[White \"{}\"]", self.white_player)?;
+        writeln!(file, "[Black \"{}\"]", self.black_player)?;
+        writeln!(file, "[Result \"{}\"]", result_str)?;
+        writeln!(file)?;
+
+        let mut board = Board::default();
+        let mut move_line = String::new();
+        for (i, &chess_move) in self.game_history.iter().enumerate() {
+            if i % 2 == 0 {
+                move_line.push_str(&format!("{}. ", i / 2 + 1));
+            }
+            let san = chess_move.to_string();
+            println!("SAN: {}", san);
+            move_line.push_str(&san);
+            move_line.push(' ');
+            board = board.make_move_new(chess_move);
+        }
+
+        writeln!(file, "{} {}", move_line.trim(), result_str)?;
+        writeln!(file)?;
+        Ok(())
     }
 
     /// Bot implementation: picks a random legal move.
@@ -152,6 +205,7 @@ impl ChessApp {
                             let chess_move = ChessMove::new(start_square, clicked_square, None);
                             if self.board.legal(chess_move) {
                                 self.board = self.board.make_move_new(chess_move);
+                                self.game_history.push(chess_move);
                             }
                         }
 
@@ -174,6 +228,21 @@ impl ChessApp {
     }
 }
 
+impl std::fmt::Display for Player {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Player::Human => write!(f, "Human"),
+            Player::Bot(model) => write!(f, "Bot ({:?})", model),
+        }
+    }
+}
+
+impl std::fmt::Display for BotModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 fn get_piece_char(piece: Piece, color: Color) -> char {
     // Using standard unicode chess characters
     let char = match piece {
@@ -190,15 +259,8 @@ fn get_piece_char(piece: Piece, color: Color) -> char {
 impl eframe::App for ChessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // --- Bot Move Logic ---
-            // Check whose turn it is and if they are a bot.
-            let current_player = match self.board.side_to_move() {
-                Color::White => &self.white_player,
-                Color::Black => &self.black_player,
-            };
-
             // If it's a bot's turn and the game is not over, make a move.
-            if let Player::Bot(model) = current_player {
+            if let Player::Bot(model) = self.current_player() {
                 if self.board.status() == BoardStatus::Ongoing {
                     // Make a copy of the model to pass to the function
                     let bot_model = *model;
@@ -226,12 +288,21 @@ impl eframe::App for ChessApp {
             self.draw_board_and_handle_input(ui);
             ui.add_space(10.0);
 
-            // Example button to reset the game
-            if ui.button("New Game").clicked() {
-                self.selected_square = None;
-                // Note: This doesn't reset the model's weights.
-                self.board = Board::default();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("New Game").clicked() {
+                    self.selected_square = None;
+                    self.board = Board::default();
+                    self.game_history.clear();
+                }
+
+                if ui.button("Save Game").clicked() {
+                    if let Err(e) = self.save_game_to_pgn() {
+                        self.model_status = format!("Error saving game: {}", e);
+                    } else {
+                        self.model_status = "Game saved to human_games.pgn".to_string();
+                    }
+                }
+            });
         });
 
         // --- Promotion UI ---
@@ -249,6 +320,7 @@ impl eframe::App for ChessApp {
                                 let chess_move = ChessMove::new(start, end, Some(piece));
                                 if self.board.legal(chess_move) {
                                     self.board = self.board.make_move_new(chess_move);
+                                    self.game_history.push(chess_move);
                                 }
                                 // Close the promotion window
                                 self.promotion_move = None;

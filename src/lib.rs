@@ -1,9 +1,9 @@
 pub mod model;
+pub mod simple_bot;
 
 use candle_core::{Device, IndexOp, Result, Tensor};
 use candle_nn::Module;
 use chess::{Board, ChessMove, Color, MoveGen, Square};
-use pprof::flamegraph::color;
 
 use crate::model::UNet;
 
@@ -61,6 +61,36 @@ pub fn board_to_small_tensor(board: &Board, device: &Device) -> Result<Tensor> {
     Tensor::from_slice(&planes, (6, 8, 8), device)
 }
 
+/// Converts a `chess::Board` and a `ChessMove` to a tensor for a move-scoring model.
+pub fn board_and_move_to_tensor(board: &Board, m: ChessMove, device: &Device) -> Result<Tensor> {
+    let mut planes = [0.0f32; 8 * 8 * 8]; // 8 channels now
+    let perspective = board.side_to_move();
+
+    // Channels 0-5: Piece positions (same as board_to_small_tensor)
+    for i in 0..64 {
+        let sq = unsafe { Square::new(i) };
+        if let Some(piece) = board.piece_on(sq) {
+            let piece_idx = piece.to_index();
+            let color = board.color_on(sq).unwrap();
+            let square_index = if perspective == Color::White { i as usize } else { 63 - i as usize };
+            let idx = piece_idx * 64 + square_index;
+            planes[idx] = if color == perspective { 1.0 } else { -1.0 };
+        }
+    }
+
+    // Channel 6: "From" square plane
+    let from_idx = m.get_source().to_index();
+    let from_square_index = if perspective == Color::White { from_idx } else { 63 - from_idx };
+    planes[6 * 64 + from_square_index] = 1.0;
+
+    // Channel 7: "To" square plane
+    let to_idx = m.get_dest().to_index();
+    let to_square_index = if perspective == Color::White { to_idx } else { 63 - to_idx };
+    planes[7 * 64 + to_square_index] = 1.0;
+
+    Tensor::from_slice(&planes, (8, 8, 8), device)
+}
+
 /// Maps a `ChessMove` to a unique index from 0 to 4095.
 pub fn move_to_index(m: ChessMove) -> usize {
     let from = m.get_source().to_index();
@@ -85,34 +115,6 @@ pub fn index_to_move(index: usize) -> ChessMove {
     ChessMove::new(from_square, to_square, None)
 }
 
-/// Uses the MLP to find the best legal move from a given board state.
-fn find_model_move(board: &Board, model: &UNet, device: &Device) -> Option<ChessMove> {
-    let board_tensor = board_to_small_tensor(board, device).ok()?;
-    let output = match model.forward(&board_tensor) {
-        Ok(tensor) => tensor,
-        Err(e) => {
-            eprintln!("Error during forward pass: {:?}", e);
-            return None;
-        }
-    };
-
-    // The first 4096 elements are policy logits
-    let logits = output.i((.., ..4096)).ok()?;
-    let mut best_move: Option<ChessMove> = None;
-    let mut max_logit = f32::NEG_INFINITY;
-
-    for m in MoveGen::new_legal(board) {
-        let move_index = move_to_index(m);
-        let move_logit = logits.get(0).ok()?.get(move_index).ok()?.to_scalar::<f32>().ok()?;
-        if move_logit > max_logit {
-            max_logit = move_logit;
-            best_move = Some(m);
-        }
-    }
-
-    best_move
-}
-
 /// Recursive minimax search function.
 fn minimax_search(
     board: &Board,
@@ -120,6 +122,8 @@ fn minimax_search(
     device: &Device,
     depth: usize,
     is_maximizing_player: bool,
+    mut alpha: f32,
+    mut beta: f32,
 ) -> f32 {
     // If we've reached the desired depth or the game is over, return the static evaluation.
     if depth == 0 || board.status() != chess::BoardStatus::Ongoing {
@@ -147,12 +151,20 @@ fn minimax_search(
     // For simplicity in this example, we iterate all legal moves.
     for m in MoveGen::new_legal(board) {
         let new_board = board.make_move_new(m);
-        let eval = minimax_search(&new_board, model, device, depth - 1, !is_maximizing_player);
+        let eval = minimax_search(&new_board, model, device, depth - 1, !is_maximizing_player, alpha, beta);
 
         if is_maximizing_player {
             best_value = best_value.max(eval);
+            alpha = alpha.max(eval);
+            if beta <= alpha {
+                break; // Beta cutoff
+            }
         } else {
             best_value = best_value.min(eval);
+            beta = beta.min(eval);
+            if beta <= alpha {
+                break; // Alpha cutoff
+            }
         }
     }
     best_value
@@ -173,8 +185,13 @@ pub fn find_best_move_with_search(board: &Board, model: &UNet, device: &Device) 
     let mut promising_moves = Vec::new();
     for m in MoveGen::new_legal(board) {
         let move_index = move_to_index(m);
-        if let Ok(logit) = policy_logits.get(0).expect("get 0 failed").get(move_index).expect("get move_index failed").to_scalar::<f32>() {
-            promising_moves.push((m, logit));
+        if let Ok(logits_for_move) = policy_logits.i((0, move_index)) {
+            if let Ok(logit) = logits_for_move.to_scalar::<f32>() {
+                promising_moves.push((m, logit));
+            }
+        } else {
+            // This case might happen if move_index is out of bounds, which would be a bug.
+            // Logging this would be a good idea.
         }
     }
 
@@ -188,7 +205,7 @@ pub fn find_best_move_with_search(board: &Board, model: &UNet, device: &Device) 
     for (m, _logit) in promising_moves.iter().take(SEARCH_WIDTH) {
         let new_board = board.make_move_new(*m);
         // We made a move, so now it's the opponent's turn (minimizing player).
-        let value = minimax_search(&new_board, model, device, SEARCH_DEPTH - 1, false);
+        let value = minimax_search(&new_board, model, device, SEARCH_DEPTH - 1, false, f32::NEG_INFINITY, f32::INFINITY);
 
         if value > max_value {
             max_value = value;

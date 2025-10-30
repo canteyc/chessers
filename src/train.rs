@@ -1,6 +1,6 @@
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::{loss, AdamW, Module, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use candle_nn::{loss, AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use clap::Parser;
 use pgn_reader::{BufferedReader, Color as PgnColor, Outcome as PgnOutcome, SanPlus, Visitor};
 use rand::seq::IteratorRandom;
@@ -205,7 +205,12 @@ fn main() -> Result<()> {
         // --- PGN Training ---
         let training_data = load_training_data_from_pgn(pgn_path)?;
         println!("Loaded {} positions from PGN file.", training_data.len());
-        train_on_data(&training_data, &model, &mut optimizer, &device, args.epochs, BATCH_SIZE, &args.output_file, &mut varmap)?;
+        for batch in training_data.chunks(BATCH_SIZE) {
+            let batch_start_time = Instant::now();
+            train_on_data(&batch, &model, &mut optimizer, &device, args.epochs, 1024, &args.output_file, &mut varmap)?;
+            let batch_duration = batch_start_time.elapsed();
+            println!( "Batch Duration: {:.3?}", batch_duration);
+        }
     } else {
         // --- Self-Play Training ---
         for epoch in 0..args.epochs {
@@ -238,10 +243,10 @@ fn main() -> Result<()> {
                 })
                 .collect();
 
-            println!("Generated {} games ({} positions) in {:?}", args.games_per_epoch, training_data.len(), data_gen_duration);
+            println!("Generated {} games ({} positions) in {:.3?}", args.games_per_epoch, training_data.len(), data_gen_duration);
             train_on_data(&training_data, &model, &mut optimizer, &device, 1, BATCH_SIZE, &args.output_file, &mut varmap)?;
             let epoch_duration = epoch_start_time.elapsed();
-            println!( "Epoch: {:4} | Duration: {:?}", epoch + 1, epoch_duration);
+            println!( "Epoch: {:4} | Duration: {:.3?}", epoch + 1, epoch_duration);
         }
     }
 
@@ -260,7 +265,7 @@ fn main() -> Result<()> {
                 let batch_start_time = Instant::now();
 
                 // --- Parallel Processing and Gradient Accumulation ---
-                let (board_tensors, target_indices, target_values): (Vec<_>, Vec<_>, Vec<_>) = batch
+                let (board_tensors, target_indices, target_values): (Vec<_>, Vec<_>, Vec<_>) = batch // TODO: This can be simplified
                     .par_iter()
                     .map(|(board, chess_move, value)| {
                         let board_tensor = board_to_small_tensor(board, &device).expect("Failed to convert board to tensor");
@@ -277,7 +282,7 @@ fn main() -> Result<()> {
                     });
 
                 let input_tensor = Tensor::stack(&board_tensors, 0)?;
-                let output = model.forward(&input_tensor)?;
+                let output = model.forward_is_training(&input_tensor, true)?;
                 let policy_logits = output.i((.., ..4096))?;
                 let value_preds = output.i((.., 4096..))?.squeeze(1)?;
 
@@ -297,7 +302,7 @@ fn main() -> Result<()> {
 
                 if (batch_num + 1) % 10 == 0 {
                     println!(
-                        "  Batch {:<5} | Positions: {:<4} | Loss: {:.5} | Duration: {:?}",
+                        "  Batch {:<5} | Positions: {:<4} | Loss: {:.5} | Duration: {:.3?}",
                         batch_num + 1, batch.len(), batch_loss / batch.len() as f32, batch_start_time.elapsed()
                     );
                 }
@@ -305,7 +310,7 @@ fn main() -> Result<()> {
 
             let avg_loss = total_epoch_loss / training_data.len() as f32;
             let epoch_duration = epoch_start_time.elapsed();
-            println!( "Epoch: {:4} | Avg Loss: {:8.5} | Duration: {:?}", epoch + 1, avg_loss, epoch_duration);
+            println!( "Epoch: {:4} | Avg Loss: {:8.5} | Duration: {:.3?}", epoch + 1, avg_loss, epoch_duration);
 
             println!("Saving model after epoch {} to {:?}", epoch + 1, output_file);
             varmap.save(output_file)?;
