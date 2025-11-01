@@ -1,12 +1,14 @@
 use candle_core::{Device};
-use chess::{Board, BoardStatus, ChessMove, Color, File, MoveGen, Piece, Rank, Square};
-use eframe::egui::{self, Color32, Rect, Sense, Vec2};
+use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
+use eframe::egui::{self};
 use rand::seq::IteratorRandom;
 use std::path::Path;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::mpsc::{channel, Receiver};
+use std::thread;
  
-use chessers::{find_best_move_with_search, model::{load_model, UNet}, simple_bot::find_simple_move};
+use chessers::{find_best_move_with_search, model::{load_model}, simple_bot::find_simple_move};
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
@@ -38,22 +40,15 @@ struct ChessApp {
     selected_square: Option<Square>,
     white_player: Player,
     black_player: Player,
-    model: UNet,
     promotion_move: Option<(Square, Square)>,
     model_status: String,
     game_history: Vec<ChessMove>,
+    bot_move_receiver: Option<Receiver<ChessMove>>,
+    bot_is_thinking: bool,
 }
 
 impl ChessApp {
     fn new() -> Self {
-        let device = Device::Cpu;
-        let model_path = Path::new("chess_6.safetensors");
-
-        let (model, model_status) = match load_model(model_path, &device) {
-            Ok(model) => (model, format!("Loaded model from: {}", model_path.display())),
-            Err(e) => panic!("Failed to load model: {}. Please run the training script first.", e),
-        };
-
         Self {
             board: Board::default(),
             selected_square: None,
@@ -61,10 +56,11 @@ impl ChessApp {
             // white_player: Player::Human, // Default to Human vs Bot
             // black_player: Player::Bot(BotModel::Random),
             black_player: Player::Human,
-            model,
             promotion_move: None,
-            model_status,
+            model_status: String::new(),
             game_history: Vec::new(),
+            bot_move_receiver: None,
+            bot_is_thinking: false,
         }
     }
 
@@ -73,20 +69,6 @@ impl ChessApp {
         match self.board.side_to_move() {
             Color::White => &self.white_player,
             Color::Black => &self.black_player,
-        }
-    }
-
-    /// Dispatches to the correct bot implementation.
-    fn make_bot_move(&mut self, model: BotModel) {
-        let best_move = match model {
-            BotModel::Random => self.find_random_move(),
-            BotModel::UNet => self.find_model_move(),
-            BotModel::Simple => find_simple_move(&self.board),
-        };
-
-        if let Some(chess_move) = best_move {
-            self.board = self.board.make_move_new(chess_move);
-            self.game_history.push(chess_move);
         }
     }
 
@@ -134,28 +116,23 @@ impl ChessApp {
         moves.choose(&mut rand::thread_rng())
     }
 
-    /// Bot implementation: uses a UNet  to pick a move.
-    fn find_model_move(&self) -> Option<ChessMove> {
-        find_best_move_with_search(&self.board, &self.model, &Device::Cpu)
-    }
-
     /// Draws the board and handles user input.
-    fn draw_board_and_handle_input(&mut self, ui: &mut egui::Ui) {
+    fn draw_board_and_handle_input(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         const SQUARE_SIZE: f32 = 60.0;
         const BOARD_SIZE: f32 = 8.0 * SQUARE_SIZE;
-        const LIGHT_SQUARE_COLOR: Color32 = Color32::from_rgb(240, 217, 181);
-        const DARK_SQUARE_COLOR: Color32 = Color32::from_rgb(181, 136, 99);
-        const SELECTED_SQUARE_COLOR: Color32 = Color32::from_rgb(135, 152, 106);
+        const LIGHT_SQUARE_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 217, 181);
+        const DARK_SQUARE_COLOR: egui::Color32 = egui::Color32::from_rgb(181, 136, 99);
+        const SELECTED_SQUARE_COLOR: egui::Color32 = egui::Color32::from_rgb(135, 152, 106);
 
         // Allocate space for the board
         let (response, painter) =
-            ui.allocate_painter(Vec2::new(BOARD_SIZE, BOARD_SIZE), Sense::click());
+            ui.allocate_painter(egui::Vec2::new(BOARD_SIZE, BOARD_SIZE), egui::Sense::click());
         let board_rect = response.rect;
 
         // --- Draw squares and pieces ---
         for rank_idx in 0..8 {
             for file_idx in 0..8 {
-                let square = Square::make_square(Rank::from_index(rank_idx), File::from_index(file_idx));
+                let square = Square::make_square(Rank::from_index(rank_idx), chess::File::from_index(file_idx));
                 let is_light = (rank_idx + file_idx) % 2 != 0;
 
                 let mut square_color = if is_light { LIGHT_SQUARE_COLOR } else { DARK_SQUARE_COLOR };
@@ -163,8 +140,8 @@ impl ChessApp {
                     square_color = SELECTED_SQUARE_COLOR;
                 }
 
-                let top_left = board_rect.left_top() + Vec2::new(file_idx as f32 * SQUARE_SIZE, (7 - rank_idx) as f32 * SQUARE_SIZE);
-                let rect = Rect::from_min_size(top_left, Vec2::new(SQUARE_SIZE, SQUARE_SIZE));
+                let top_left = board_rect.left_top() + egui::Vec2::new(file_idx as f32 * SQUARE_SIZE, (7 - rank_idx) as f32 * SQUARE_SIZE);
+                let rect = egui::Rect::from_min_size(top_left, egui::Vec2::new(SQUARE_SIZE, SQUARE_SIZE));
                 painter.rect_filled(rect, 0.0, square_color);
 
                 // Draw piece
@@ -176,7 +153,7 @@ impl ChessApp {
                         egui::Align2::CENTER_CENTER,
                         piece_char,
                         egui::FontId::monospace(SQUARE_SIZE * 0.8),
-                        if piece_color == Color::White { Color32::WHITE } else { Color32::BLACK },
+                        if piece_color == Color::White { egui::Color32::WHITE } else { egui::Color32::BLACK },
                     );
                 }
             }
@@ -189,7 +166,7 @@ impl ChessApp {
                 let rank_idx = 7 - ((click_pos.y - board_rect.top()) / SQUARE_SIZE).floor() as usize;
 
                 if file_idx < 8 && rank_idx < 8 {
-                    let clicked_square = Square::make_square(Rank::from_index(rank_idx), File::from_index(file_idx));
+                    let clicked_square = Square::make_square(Rank::from_index(rank_idx), chess::File::from_index(file_idx));
 
                     if let Some(start_square) = self.selected_square {
                         // This is the second click (destination)
@@ -206,6 +183,7 @@ impl ChessApp {
                             if self.board.legal(chess_move) {
                                 self.board = self.board.make_move_new(chess_move);
                                 self.game_history.push(chess_move);
+                                ctx.request_repaint();
                             }
                         }
 
@@ -258,18 +236,65 @@ fn get_piece_char(piece: Piece, color: Color) -> char {
 
 impl eframe::App for ChessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // If it's a bot's turn and the game is not over, make a move.
-            if let Player::Bot(model) = self.current_player() {
-                if self.board.status() == BoardStatus::Ongoing {
-                    // Make a copy of the model to pass to the function
-                    let bot_model = *model;
-                    self.make_bot_move(bot_model);
-                    // Request a repaint to show the bot's move immediately
-                    ctx.request_repaint();
+        // If a bot move has been received, apply it
+        if let Some(receiver) = &self.bot_move_receiver {
+            if let Ok(bot_move) = receiver.try_recv() {
+                if self.board.legal(bot_move) {
+                    self.board = self.board.make_move_new(bot_move);
+                    self.game_history.push(bot_move);
+                }
+                self.bot_move_receiver = None;
+                self.bot_is_thinking = false;
+                ctx.request_repaint();
+            }
+        }
+
+        // If it's a bot's turn and it's not already thinking, start thinking
+        if let Player::Bot(model) = self.current_player() {
+            if self.board.status() == BoardStatus::Ongoing && !self.bot_is_thinking {
+                let bot_model = *model;
+                match bot_model {
+                    BotModel::UNet => {
+                        self.bot_is_thinking = true;
+                        let (sender, receiver) = channel();
+                        self.bot_move_receiver = Some(receiver);
+                        let current_board = self.board.clone();
+                        
+                        thread::spawn(move || {
+                            let device = Device::Cpu;
+                            let model_path = Path::new("chess_6.safetensors");
+                            if let Ok(model) = load_model(model_path, &device) {
+                                if let Some(best_move) = find_best_move_with_search(&current_board, &model, &device) {
+                                    let _ = sender.send(best_move);
+                                }
+                            }
+                        });
+                    }
+                    BotModel::Simple => {
+                        self.bot_is_thinking = true;
+                        let (sender, receiver) = channel();
+                        self.bot_move_receiver = Some(receiver);
+                        let current_board = self.board.clone();
+
+                        thread::spawn(move || {
+                            if let Some(best_move) = find_simple_move(&current_board) {
+                                let _ = sender.send(best_move);
+                            }
+                        });
+                    }
+                    BotModel::Random => {
+                        // For random bot, we can just make the move directly
+                        if let Some(chess_move) = self.find_random_move() {
+                            self.board = self.board.make_move_new(chess_move);
+                            self.game_history.push(chess_move);
+                        }
+                        ctx.request_repaint();
+                    }
                 }
             }
+        }
 
+        egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Chessers");
             ui.label(&self.model_status);
 
@@ -279,13 +304,17 @@ impl eframe::App for ChessApp {
                 ui.label(format!("{:?}", self.board.side_to_move()));
             });
 
+            if self.bot_is_thinking {
+                ui.label("Bot is thinking...");
+            }
+
             if self.board.status() != BoardStatus::Ongoing {
                 ui.label(format!("Game Over: {:?}", self.board.status()));
             }
 
             // --- Board Rendering and Input ---
             ui.add_space(10.0);
-            self.draw_board_and_handle_input(ui);
+            self.draw_board_and_handle_input(ui, ctx);
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
@@ -293,6 +322,8 @@ impl eframe::App for ChessApp {
                     self.selected_square = None;
                     self.board = Board::default();
                     self.game_history.clear();
+                    self.bot_is_thinking = false;
+                    self.bot_move_receiver = None;
                 }
 
                 if ui.button("Save Game").clicked() {
@@ -321,6 +352,7 @@ impl eframe::App for ChessApp {
                                 if self.board.legal(chess_move) {
                                     self.board = self.board.make_move_new(chess_move);
                                     self.game_history.push(chess_move);
+                                    ctx.request_repaint();
                                 }
                                 // Close the promotion window
                                 self.promotion_move = None;
