@@ -38,3 +38,13 @@
 
 1. b2b4 e7e5 2. c2c3 d8h4 3. d1c2 f8c5 4. h2h3 h4f2 5. e1d1 f2f1 0-1
 
+[Event "Human vs Bot"]
+[Site "Local"]
+[Date "2025.11.01"]
+[Round "-"]
+[White "Bot (Simple)"]
+[Black "Human"]
+[Result "1-0"]
+
+1. e2e4 e7e5 2. d1f3 d8f6 3. f1c4 f6f3 4. g1f3 b8c6 5. c4f7 e8f7 6. f3g5 f7f6 7. b1c3 f6g5 8. c3d5 c6d4 9. c2c3 c7c6 10. c3d4 c6d5 11. h2h4 g5f6 12. h1h3 d5e4 13. h3g3 e5d4 14. g3g4 f8c5 15. g4f4 f6e5 16. b2b4 e4e3 17. b4c5 e5f4 18. d2e3 d4e3 19. a1b1 f4e4 20. b1b4 e4d5 21. c1e3 g8f6 22. b4d4 d5e5 23. d4d6 e5e4 24. f2f3 e4f5 25. h4h5 f6h5 26. g2g4 f5e5 27. e1f2 h5f4 28. e3d4 1-0
+

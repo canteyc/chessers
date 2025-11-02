@@ -1,6 +1,6 @@
-use candle_core::{Device};
+use candle_core::Device;
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Rank, Square};
-use eframe::egui::{self};
+use eframe::egui;
 use rand::seq::IteratorRandom;
 use std::path::Path;
 use std::fs::OpenOptions;
@@ -8,7 +8,7 @@ use std::io::Write;
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
  
-use chessers::{find_best_move_with_search, model::{load_model}, simple_bot::find_simple_move};
+use chessers::{find_best_move_with_search, model::load_model, simple_bot::find_simple_move};
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
