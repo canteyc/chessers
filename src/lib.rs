@@ -2,7 +2,6 @@ pub mod model;
 pub mod simple_bot;
 
 use candle_core::{Device, IndexOp, Result, Tensor};
-use candle_nn::Module;
 use chess::{Board, ChessMove, Color, MoveGen, Square};
 
 use crate::model::UNet;
@@ -91,28 +90,17 @@ pub fn board_and_move_to_tensor(board: &Board, m: ChessMove, device: &Device) ->
     Tensor::from_slice(&planes, (8, 8, 8), device)
 }
 
-/// Maps a `ChessMove` to a unique index from 0 to 4095.
-pub fn move_to_index(m: ChessMove) -> usize {
-    let from = m.get_source().to_index();
-    let to = m.get_dest().to_index();
-    // Note: This simple mapping doesn't account for promotions.
-    // A more advanced mapping would be needed for a full-featured engine.
-    from * 64 + to
+pub fn move_to_index(m: ChessMove) -> (usize, usize) {
+    (m.get_source().to_index(), m.get_dest().to_index())
 }
 
-/// Maps an index from 0 to 4095 back to a potential `ChessMove`.
-/// Note: This does not guarantee the move is legal.
+/// Maps an index from 0 to 63 back to a potential `ChessMove`.
+/// Note: This does not guarantee the move is legal and does not specify the source square.
 pub fn index_to_move(index: usize) -> ChessMove {
-    let from_sq_idx = (index / 64) as u8;
-    let to_sq_idx = (index % 64) as u8;
-
-    // These are safe because the index calculation ensures they are within 0-63.
-    let from_square = unsafe { Square::new(from_sq_idx) };
-    let to_square = unsafe { Square::new(to_sq_idx) };
-
-    // This doesn't handle promotions. For now, we assume no promotion.
-    // A real implementation would need to check the piece and rank.
-    ChessMove::new(from_square, to_square, None)
+    let to_square = unsafe { Square::new(index as u8) };
+    // The from square is unknown, so we'll use a placeholder.
+    // This function is not critical for training, but is updated for consistency.
+    ChessMove::new(to_square, to_square, None)
 }
 
 /// Recursive minimax search function.
@@ -131,12 +119,12 @@ fn minimax_search(
             Ok(t) => t,
             Err(_) => return 0.0, // Return neutral score on error
         };
-        let output = match model.forward(&board_tensor) {
+        let (_policy_output, value_output) = match model.forward_all(&board_tensor) {
             Ok(t) => t,
             Err(_) => return 0.0,
         };
         // The value is from the perspective of the current player on the board.
-        let value = output.i((0, 4096)).and_then(|t| t.to_scalar::<f32>()).unwrap_or(0.0);
+        let value = value_output.i((0, 0)).and_then(|t| t.to_scalar::<f32>()).unwrap_or(0.0);
 
         // Minimax needs the score relative to the initial player of the search.
         // If we are the maximizing player, and it's our turn on this board, the value is good.
@@ -179,12 +167,11 @@ pub fn find_best_move_with_search(board: &Board, model: &UNet, device: &Device) 
     // --- 1. Policy Head Pruning ---
     // First, find the most promising moves according to the policy head.
     let initial_board_tensor = board_to_small_tensor(board, device).ok()?;
-    let initial_output = model.forward(&initial_board_tensor).ok()?;
-    let policy_logits = initial_output.i((.., ..4096)).ok()?;
+    let (policy_logits, _value_logits) = model.forward_all(&initial_board_tensor).ok()?;
 
     let mut promising_moves = Vec::new();
     for m in MoveGen::new_legal(board) {
-        let move_index = move_to_index(m);
+        let move_index = m.get_source().to_index() * 64 + m.get_dest().to_index();
         if let Ok(logits_for_move) = policy_logits.i((0, move_index)) {
             if let Ok(logit) = logits_for_move.to_scalar::<f32>() {
                 promising_moves.push((m, logit));
@@ -192,6 +179,7 @@ pub fn find_best_move_with_search(board: &Board, model: &UNet, device: &Device) 
         } else {
             // This case might happen if move_index is out of bounds, which would be a bug.
             // Logging this would be a good idea.
+            continue;
         }
     }
 
@@ -216,4 +204,29 @@ pub fn find_best_move_with_search(board: &Board, model: &UNet, device: &Device) 
     // If the search yields no move (e.g., all top moves lead to errors),
     // fall back to the best policy move from the initial set.
     best_move.or_else(|| promising_moves.first().map(|(m, _)| *m))
+}
+
+pub fn find_best_move(board: &Board, model: &UNet, device: &Device) -> Option<ChessMove> {
+    let board_tensor = board_to_small_tensor(board, device).ok()?;
+    let (policy, _value) = model.forward_all(&board_tensor).ok()?;
+    let from_logits = policy.i((.., 0)).ok()?.flatten_from(1).ok()?;
+    let to_logits = policy.i((.., 1)).ok()?.flatten_from(1).ok()?;
+    let mut best_move: Option<ChessMove> = None;
+    let mut max_logit = f32::NEG_INFINITY;
+
+    for m in MoveGen::new_legal(board) {
+        let (from_index, to_index) = move_to_index(m);
+        if let (Ok(from_logit_tensor), Ok(to_logit_tensor)) = (from_logits.i((0, from_index)), to_logits.i((0, to_index))) {
+            if let (Ok(from_logit), Ok(to_logit)) = (from_logit_tensor.to_scalar::<f32>(), to_logit_tensor.to_scalar::<f32>()) {
+                let mut logit = from_logit + to_logit;
+                logit += rand::random::<f32>();
+                if logit > max_logit {
+                    max_logit = logit;
+                    dbg!(max_logit);
+                    best_move = Some(m);
+                }
+            }
+        }
+    }
+    best_move
 }

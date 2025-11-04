@@ -52,10 +52,10 @@ impl ChessApp {
         Self {
             board: Board::default(),
             selected_square: None,
-            white_player: Player::Bot(BotModel::Simple), // Default to Human vs Bot
-            // white_player: Player::Human, // Default to Human vs Bot
-            // black_player: Player::Bot(BotModel::Random),
-            black_player: Player::Human,
+            // white_player: Player::Bot(BotModel::UNet), // Default to Human vs Bot
+            white_player: Player::Human, // Default to Human vs Bot
+            black_player: Player::Bot(BotModel::UNet),
+            // black_player: Player::Human,
             promotion_move: None,
             model_status: String::new(),
             game_history: Vec::new(),
@@ -306,6 +306,8 @@ impl eframe::App for ChessApp {
 
             if self.bot_is_thinking {
                 ui.label("Bot is thinking...");
+            } else {
+                ui.label("Your move!");
             }
 
             if self.board.status() != BoardStatus::Ongoing {

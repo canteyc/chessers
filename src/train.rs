@@ -3,14 +3,16 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{loss, AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use clap::Parser;
 use pgn_reader::{BufferedReader, Color as PgnColor, Outcome as PgnOutcome, SanPlus, Visitor};
-use rand::seq::IteratorRandom;
 use rayon::prelude::*;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use chessers::{board_to_small_tensor, find_best_move_with_search, model::UNet};
-use chessers::{move_to_index};
-use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
+use chessers::{
+    board_to_small_tensor, find_best_move, move_to_index, 
+    simple_bot::find_simple_move,
+    model::UNet
+};
+use chess::{Board, BoardStatus, ChessMove, Color};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -89,7 +91,8 @@ impl Visitor for GameVisitor {
 
 /// Plays a full game of chess with the model playing against itself.
 /// Returns the game history and the result.
-fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Vec<(Board, ChessMove)>, GameResult)> {
+fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Vec<(Board, ChessMove)>, GameResult)> 
+{
     let mut board = Board::default();
     let mut game_history = Vec::new();
     let mut move_count = 0;
@@ -101,11 +104,10 @@ fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Ve
 
         let best_move = if rand::random::<f32>() < exploration_rate {
             // Exploration: pick a random move
-            let moves = MoveGen::new_legal(&board);
-            moves.choose(&mut rand::thread_rng())
+            find_simple_move(&board)
         } else {
             // Exploitation: use the model to find the best move
-            find_best_move_with_search(&board, model, device)
+            find_best_move(&board, model, device)
         };
 
         if let Some(chess_move) = best_move {
@@ -223,7 +225,7 @@ fn main() -> Result<()> {
                 .into_par_iter()
                 .map(|_| {
                     // Anneal exploration rate over epochs
-                    let exploration_rate = (0.5 * (1.0 - (epoch as f32 / args.epochs as f32))).max(0.1);
+                    let exploration_rate = (0.9 * (1.0 - (epoch as f32 / args.epochs as f32))).max(0.1);
                     play_game(&model, &device, exploration_rate).unwrap()
                 })
                 .collect();
@@ -244,7 +246,7 @@ fn main() -> Result<()> {
                 .collect();
 
             println!("Generated {} games ({} positions) in {:.3?}", args.games_per_epoch, training_data.len(), data_gen_duration);
-            train_on_data(&training_data, &model, &mut optimizer, &device, 1, BATCH_SIZE, &args.output_file, &mut varmap)?;
+            train_on_data(&training_data, &model, &mut optimizer, &device, 10, BATCH_SIZE, &args.output_file, &mut varmap)?;
             let epoch_duration = epoch_start_time.elapsed();
             println!( "Epoch: {:4} | Duration: {:.3?}", epoch + 1, epoch_duration);
         }
@@ -265,35 +267,39 @@ fn main() -> Result<()> {
                 let batch_start_time = Instant::now();
 
                 // --- Parallel Processing and Gradient Accumulation ---
-                let (board_tensors, target_indices, target_values): (Vec<_>, Vec<_>, Vec<_>) = batch // TODO: This can be simplified
+                let (board_tensors, target_from_indices, target_to_indices, target_values): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) = batch // TODO: This can be simplified
                     .par_iter()
                     .map(|(board, chess_move, value)| {
                         let board_tensor = board_to_small_tensor(board, &device).expect("Failed to convert board to tensor");
-                        let move_index = move_to_index(*chess_move) as u32;
-                        (board_tensor, move_index, *value)
+                        let (from_index, to_index) = move_to_index(*chess_move);
+                        (board_tensor, from_index as u32, to_index as u32, *value)
                     })
                     .collect::<Vec<_>>()
                     .into_iter()
-                    .fold((Vec::new(), Vec::new(), Vec::new()), |mut acc, (b, m, v)| {
+                    .fold((Vec::new(), Vec::new(), Vec::new(), Vec::new()), |mut acc, (b, f, t, v)| {
                         acc.0.push(b);
-                        acc.1.push(m);
-                        acc.2.push(v);
+                        acc.1.push(f);
+                        acc.2.push(t);
+                        acc.3.push(v);
                         acc
                     });
 
                 let input_tensor = Tensor::stack(&board_tensors, 0)?;
-                let output = model.forward_is_training(&input_tensor, true)?;
-                let policy_logits = output.i((.., ..4096))?;
-                let value_preds = output.i((.., 4096..))?.squeeze(1)?;
+                let (policy_logits, value_preds) = model.forward_all(&input_tensor)?;
+                let from_logits = policy_logits.i((.., 0))?.flatten_from(1)?;
+                let to_logits = policy_logits.i((.., 1))?.flatten_from(1)?;
 
-                let policy_targets = Tensor::new(target_indices.as_slice(), &device)?;
+                let from_targets = Tensor::new(target_from_indices.as_slice(), &device)?;
+                let to_targets = Tensor::new(target_to_indices.as_slice(), &device)?;
                 let value_targets = Tensor::new(target_values.as_slice(), &device)?;
 
                 // Apply log_softmax here before calculating cross_entropy loss
-                let policy_logits_sm = candle_nn::ops::log_softmax(&policy_logits, 1)?;
-                let policy_loss = loss::cross_entropy(&policy_logits_sm, &policy_targets)?;
-                let value_loss = loss::mse(&value_preds, &value_targets)?;
-                let total_loss = (policy_loss.to_device(&device)? + value_loss.to_device(&device)?)?;
+                let from_logits_sm = candle_nn::ops::log_softmax(&from_logits, 1)?;
+                let to_logits_sm = candle_nn::ops::log_softmax(&to_logits, 1)?;
+                let from_loss = loss::cross_entropy(&from_logits_sm, &from_targets)?;
+                let to_loss = loss::cross_entropy(&to_logits_sm, &to_targets)?;
+                let value_loss = loss::mse(&value_preds.squeeze(1)?, &value_targets)?;
+                let total_loss = (from_loss.to_device(&device)? + to_loss.to_device(&device)? + value_loss.to_device(&device)?)?;
 
                 optimizer.backward_step(&total_loss)?;
 
