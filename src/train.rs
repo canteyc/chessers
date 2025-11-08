@@ -12,13 +12,13 @@ use chessers::{
     simple_bot::find_simple_move,
     model::UNet
 };
-use chess::{Board, BoardStatus, ChessMove, Color};
+use chess::{Board, BoardStatus, ChessMove, Color, Game};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Number of games to generate and train on per epoch.
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 100)]
     games_per_epoch: usize,
 
     /// Path to save the trained model weights.
@@ -26,7 +26,7 @@ struct Args {
     output_file: PathBuf,
 
     /// Number of epochs to train for.
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 40)]
     epochs: usize,
 
     /// Learning rate for the optimizer.
@@ -93,12 +93,18 @@ impl Visitor for GameVisitor {
 /// Returns the game history and the result.
 fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Vec<(Board, ChessMove)>, GameResult)> 
 {
-    let mut board = Board::default();
+    let mut game = Game::new();
     let mut game_history = Vec::new();
     let mut move_count = 0;
 
     loop {
-        if board.status() != BoardStatus::Ongoing || move_count > 200 { // Max moves to prevent infinite games
+        let board = game.current_position();
+        if game.result().is_some() || move_count > 200 { // Max moves to prevent infinite games
+            break;
+        }
+
+        if game.can_declare_draw() {
+            game.declare_draw();
             break;
         }
 
@@ -107,28 +113,23 @@ fn play_game(model: &UNet, device: &Device, exploration_rate: f32) -> Result<(Ve
             find_simple_move(&board)
         } else {
             // Exploitation: use the model to find the best move
-            find_best_move(&board, model, device)
+            find_best_move(&board, &model, &device)
         };
 
         if let Some(chess_move) = best_move {
             game_history.push((board, chess_move));
-            board = board.make_move_new(chess_move);
+            game.make_move(chess_move);
             move_count += 1;
         } else {
             // No legal moves, game is over.
             break;
         }
     }
-
-    let result = match board.status() {
-        BoardStatus::Checkmate | BoardStatus::Stalemate if move_count < 200 => {
-            if board.side_to_move() == Color::White {
-                GameResult::BlackWin
-            } else {
-                GameResult::WhiteWin
-            }
-        },
-        _ => GameResult::Draw, // Stalemate, insufficient material, etc.
+    
+    let result = match game.result() {
+        Some(chess::GameResult::WhiteCheckmates) => GameResult::WhiteWin,
+        Some(chess::GameResult::BlackCheckmates) => GameResult::BlackWin,
+        _ => GameResult::Draw,
     };
 
     Ok((game_history, result))
@@ -225,7 +226,7 @@ fn main() -> Result<()> {
                 .into_par_iter()
                 .map(|_| {
                     // Anneal exploration rate over epochs
-                    let exploration_rate = (0.9 * (1.0 - (epoch as f32 / args.epochs as f32))).max(0.1);
+                    let exploration_rate = (0.5 * (1.0 - (epoch as f32 / args.epochs as f32))).max(0.1);
                     play_game(&model, &device, exploration_rate).unwrap()
                 })
                 .collect();
@@ -246,7 +247,7 @@ fn main() -> Result<()> {
                 .collect();
 
             println!("Generated {} games ({} positions) in {:.3?}", args.games_per_epoch, training_data.len(), data_gen_duration);
-            train_on_data(&training_data, &model, &mut optimizer, &device, 10, BATCH_SIZE, &args.output_file, &mut varmap)?;
+            train_on_data(&training_data, &model, &mut optimizer, &device, 100, BATCH_SIZE, &args.output_file, &mut varmap)?;
             let epoch_duration = epoch_start_time.elapsed();
             println!( "Epoch: {:4} | Duration: {:.3?}", epoch + 1, epoch_duration);
         }

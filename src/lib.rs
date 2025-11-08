@@ -222,7 +222,6 @@ pub fn find_best_move(board: &Board, model: &UNet, device: &Device) -> Option<Ch
                 logit += rand::random::<f32>();
                 if logit > max_logit {
                     max_logit = logit;
-                    dbg!(max_logit);
                     best_move = Some(m);
                 }
             }
